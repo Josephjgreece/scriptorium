@@ -2,7 +2,7 @@
 
 A calm, three-pane Markdown writing app for Windows (and macOS/Linux): **library → sheet list → editor**.
 
-Your library is a plain folder of `.md` files. Groups are folders, sheets are files, so your writing never depends on this app.
+Your library is a plain folder of `.md` files. Groups are folders, sheets are files, so your writing never depends on this app. The only extra is `.scriptorium.json` in the library folder (sheet order, material marks, glue, filters); delete it and your writing is untouched.
 Default location: `Documents/Scriptorium` (override with the `SCRIPTORIUM_LIBRARY` environment variable).
 
 ## What's in this first version
@@ -14,6 +14,11 @@ Default location: `Documents/Scriptorium` (override with the `SCRIPTORIUM_LIBRAR
 - Autosave; a new sheet is named after its first line
 - Search across the whole library
 - Drag a sheet onto a group to move it; right-click for rename / delete / export
+- **Manual order**: drag sheets up and down inside a group; new sheets go to the end
+- **Material sheets** (right-click → Mark as material): research and notes, tinted, with a torn-page icon, left out of group word counts and group exports
+- **Glued sheets**: select neighbouring sheets (Ctrl/Cmd or Shift-click), right-click → Glue. They edit as one continuous text but stay separate files; Unglue any time
+- **Filters** (smart folders): saved searches by text, group and recency, listed in the sidebar; search the library and press "Save as filter"
+- Right-click a group → Export group… joins its sheets in your order, skipping material
 - Delete moves things to `.trash` inside the library, nothing is lost
 - Export to DOCX / PDF / HTML / ODT / EPUB through [Pandoc](https://pandoc.org) (install it separately; PDF also needs a LaTeX engine)
 
@@ -44,6 +49,7 @@ npm run tauri build    # make an installer (src-tauri/target/release/bundle)
 ```
 src/main.ts           the UI: panes, menus, saving, shortcuts
 src/editor.ts         CodeMirror setup and the prose styling
+src/meta.ts           order / material / glue / filter model
 src/api.ts            bridge to Rust (plus the browser stand-in)
 src-tauri/src/library.rs   all file handling (unit-tested, no Tauri dependency)
 src-tauri/src/lib.rs       thin Tauri command wrappers

@@ -69,6 +69,21 @@ async fn export_sheet(lib: State<'_, Library>, path: String, dest: String) -> Re
     library::export(&lib.root, &path, &dest)
 }
 
+#[tauri::command]
+async fn export_text(content: String, dest: String) -> Result<(), String> {
+    library::export_text(&content, &dest)
+}
+
+#[tauri::command]
+fn read_meta(lib: State<Library>) -> String {
+    library::read_meta(&lib.root)
+}
+
+#[tauri::command]
+fn write_meta(lib: State<Library>, json: String) -> Result<(), String> {
+    library::write_meta(&lib.root, &json)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -96,7 +111,10 @@ pub fn run() {
             delete_item,
             move_item,
             search,
-            export_sheet
+            export_sheet,
+            export_text,
+            read_meta,
+            write_meta
         ])
         .run(tauri::generate_context!())
         .expect("error while running Scriptorium");

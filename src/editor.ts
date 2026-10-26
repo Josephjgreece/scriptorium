@@ -2,9 +2,10 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirro
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { searchKeymap } from "@codemirror/search";
-import { EditorState, type Extension } from "@codemirror/state";
-import { drawSelection, EditorView, keymap } from "@codemirror/view";
+import { EditorState, StateField, type Extension, type Range } from "@codemirror/state";
+import { Decoration, type DecorationSet, drawSelection, EditorView, keymap, WidgetType } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
+import { GLUE_JOIN } from "./meta";
 
 // Markdown marks (#, **, >, ...) are dimmed so the text reads as prose, not as code.
 const prose = HighlightStyle.define([
@@ -45,13 +46,49 @@ const theme = EditorView.theme({
   ".cm-searchMatch.cm-searchMatch-selected": { backgroundColor: "var(--sel)" },
 });
 
+// ---- glued sheets: several files edited as one text, joined by a divider you can't edit
+
+class JoinWidget extends WidgetType {
+  toDOM(): HTMLElement {
+    const d = document.createElement("div");
+    d.className = "glue-join";
+    return d;
+  }
+  eq(): boolean {
+    return true;
+  }
+  ignoreEvent(): boolean {
+    return false;
+  }
+}
+
+function joinRanges(text: string): [number, number][] {
+  const out: [number, number][] = [];
+  for (let i = text.indexOf(GLUE_JOIN); i >= 0; i = text.indexOf(GLUE_JOIN, i + GLUE_JOIN.length)) out.push([i, i + GLUE_JOIN.length]);
+  return out;
+}
+
+const joinDecos = StateField.define<DecorationSet>({
+  create: (state) => build(state),
+  update: (value, tr) => (tr.docChanged ? build(tr.state) : value),
+  provide: (f) => EditorView.decorations.from(f),
+});
+function build(state: EditorState): DecorationSet {
+  const marks: Range<Decoration>[] = joinRanges(state.doc.toString()).map(([a, b]) =>
+    Decoration.replace({ widget: new JoinWidget(), block: true }).range(a, b),
+  );
+  return Decoration.set(marks);
+}
+
+const protectJoins = EditorState.changeFilter.of((tr) => (tr.startState.field(joinDecos, false) ? joinRanges(tr.startState.doc.toString()).flat() : true));
+
 export interface EditorHooks {
   onChange(): void;
   isTypewriter(): boolean;
 }
 
 /** A fresh state per sheet, so undo history never leaks from one sheet into the next. */
-export function makeState(doc: string, hooks: EditorHooks): EditorState {
+export function makeState(doc: string, hooks: EditorHooks, glued = false): EditorState {
   const extensions: Extension[] = [
     history(),
     drawSelection(),
@@ -59,6 +96,7 @@ export function makeState(doc: string, hooks: EditorHooks): EditorState {
     markdown({ base: markdownLanguage }),
     syntaxHighlighting(prose),
     theme,
+    ...(glued ? [joinDecos, protectJoins, EditorView.atomicRanges.of((v) => v.state.field(joinDecos))] : []),
     EditorView.contentAttributes.of({ spellcheck: "true", autocapitalize: "sentences", "aria-label": "Sheet text" }),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
     EditorView.updateListener.of((u) => {

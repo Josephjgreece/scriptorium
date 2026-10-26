@@ -9,6 +9,8 @@
   --line: #dcdcdc;
   --accent: #2f6fd9;
   --on-accent: #ffffff;
+  --material-bg: #fbf3d9;
+  --material-item: #f7edc8;
   --sel: #cfe0fa;
   --code-bg: #f0f0f2;
   --hover: rgba(0, 0, 0, 0.05);
@@ -32,6 +34,8 @@
   --line: #38393d;
   --accent: #3b7de0;
   --on-accent: #ffffff;
+  --material-bg: #2b2818;
+  --material-item: #3a3520;
   --sel: #2d4670;
   --code-bg: #2c2d31;
   --hover: rgba(255, 255, 255, 0.06);
@@ -51,6 +55,8 @@
     --line: #38393d;
     --accent: #3b7de0;
     --on-accent: #ffffff;
+    --material-bg: #2b2818;
+    --material-item: #3a3520;
     --sel: #2d4670;
     --code-bg: #2c2d31;
     --hover: rgba(255, 255, 255, 0.06);
@@ -247,6 +253,30 @@ button {
   user-select: none;
 }
 
+.tree-label.with-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-right: 2px;
+}
+
+.icon-btn.mini {
+  width: 22px;
+  height: 22px;
+}
+
+.icon-btn.mini svg {
+  width: 13px;
+  height: 13px;
+}
+
+.tree-hint {
+  padding: 2px 8px 4px 28px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
 .tree-label:first-child {
   padding-top: 4px;
 }
@@ -292,9 +322,41 @@ button {
   font-weight: 600;
   color: var(--muted);
   border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  text-transform: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.list-title .lt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.list-title .lt-count {
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.lt-btn {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--accent);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.lt-btn:hover {
+  border-color: var(--accent);
 }
 
 .sheets {
@@ -314,16 +376,62 @@ button {
   background: var(--hover);
 }
 
-.sheet-item.active {
+.sheet-item.material {
+  background: var(--material-item);
+}
+
+.sheet-item.selected {
   background: var(--accent);
   border-bottom-color: var(--accent);
   color: var(--on-accent);
 }
 
-.sheet-item.active .si-prev,
-.sheet-item.active .si-meta {
+.sheet-item.selected .si-prev,
+.sheet-item.selected .si-meta,
+.sheet-item.selected .si-badge {
   color: var(--on-accent);
   opacity: 0.88;
+}
+
+.si-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.si-head .si-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.si-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  margin-top: 1px;
+  color: var(--muted);
+}
+
+.si-badge svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sheet-item.glued {
+  box-shadow: inset 3px 0 0 var(--head);
+}
+
+.sheet-item.drop-above {
+  box-shadow: inset 0 3px 0 var(--accent);
+}
+
+.sheet-item.drop-below {
+  box-shadow: inset 0 -3px 0 var(--accent);
 }
 
 .si-title {
@@ -456,6 +564,32 @@ button {
   visibility: hidden;
 }
 
+/* ---------- material + glued sheets ---------- */
+
+.is-material .editor-pane {
+  --bg: var(--material-bg);
+}
+
+.is-material .ed-crumb::before {
+  content: "Material · ";
+  color: var(--accent);
+}
+
+.glue-join {
+  position: relative;
+  height: 3.2rem;
+  user-select: none;
+}
+
+.glue-join::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 1px dashed var(--mark);
+}
+
 /* ---------- focus + typewriter ---------- */
 
 body.focus .app {
@@ -558,6 +692,18 @@ body.typewriter .cm-scroller .cm-content {
   color: var(--text);
   font: inherit;
   outline: none;
+}
+
+.modal select {
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
 }
 
 .modal input:focus {

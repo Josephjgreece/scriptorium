@@ -394,8 +394,21 @@ pub fn search(root: &Path, query: &str) -> Vec<SearchHit> {
 
 pub fn export(root: &Path, rel: &str, dest: &str) -> Res<()> {
     let src = resolve(root, rel)?;
+    run_pandoc(&src, dest)
+}
+
+/// Export text that isn't a single file on disk (glued sheets joined together).
+pub fn export_text(content: &str, dest: &str) -> Res<()> {
+    let tmp = std::env::temp_dir().join(format!("scriptorium-export-{}.md", std::process::id()));
+    fs::write(&tmp, content).map_err(err)?;
+    let r = run_pandoc(&tmp, dest);
+    let _ = fs::remove_file(&tmp);
+    r
+}
+
+fn run_pandoc(src: &Path, dest: &str) -> Res<()> {
     let out = Command::new("pandoc")
-        .arg(&src)
+        .arg(src)
         .arg("-f")
         .arg("markdown")
         .arg("-o")
@@ -409,6 +422,22 @@ pub fn export(root: &Path, rel: &str, dest: &str) -> Res<()> {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
     }
+}
+
+// ---------- structure metadata ----------
+
+const META_FILE: &str = ".scriptorium.json";
+
+/// Sheet order, material flags, glued sheets and saved filters live in one hidden JSON file in
+/// the library root, so the Markdown files themselves stay clean. The UI owns the schema.
+pub fn read_meta(root: &Path) -> String {
+    fs::read_to_string(root.join(META_FILE)).unwrap_or_default()
+}
+
+pub fn write_meta(root: &Path, json: &str) -> Res<()> {
+    let tmp = root.join(format!("{META_FILE}.tmp"));
+    fs::write(&tmp, json).map_err(err)?;
+    fs::rename(&tmp, root.join(META_FILE)).map_err(err)
 }
 
 // ---------- first run ----------
@@ -541,6 +570,16 @@ mod tests {
         assert!(h[0].snippet.contains("Quick"));
         assert_eq!(search(&r, "beta").len(), 1);
         assert!(search(&r, "  ").is_empty());
+    }
+
+    #[test]
+    fn meta_round_trips_and_stays_hidden() {
+        let root = tmp("meta");
+        assert_eq!(read_meta(&root), "");
+        write_meta(&root, "{\"material\":[]}").unwrap();
+        assert_eq!(read_meta(&root), "{\"material\":[]}");
+        assert!(sheets(&root, "", true).unwrap().is_empty());
+        assert!(!tree(&root).children.iter().any(|g| g.name.starts_with('.')));
     }
 
     #[test]

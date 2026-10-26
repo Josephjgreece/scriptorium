@@ -36,6 +36,11 @@ export interface Api {
   search(query: string): Promise<SearchHit[]>;
   /** Returns the saved file path, or null if the person cancelled. */
   exportSheet(path: string, suggestedName: string): Promise<string | null>;
+  /** Export text that isn't one file on disk (glued sheets). */
+  exportText(content: string, suggestedName: string): Promise<string | null>;
+  /** Structure metadata (order, material, glue, filters) as JSON text; "" when none saved yet. */
+  readMeta(): Promise<string>;
+  writeMeta(json: string): Promise<void>;
 }
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -59,22 +64,34 @@ async function tauriApi(): Promise<Api> {
     moveItem: (path, destGroup) => invoke("move_item", { path, destGroup }),
     search: (query) => invoke("search", { query }),
     async exportSheet(path, suggestedName) {
-      const safe = suggestedName.replace(/[\\/:*?"<>|]/g, "").trim() || "Sheet";
-      const dest = await save({
-        defaultPath: `${safe}.docx`,
-        filters: [
-          { name: "Word document", extensions: ["docx"] },
-          { name: "PDF (needs a LaTeX engine)", extensions: ["pdf"] },
-          { name: "HTML", extensions: ["html"] },
-          { name: "OpenDocument", extensions: ["odt"] },
-          { name: "EPUB", extensions: ["epub"] },
-        ],
-      });
+      const dest = await pickExportPath(suggestedName);
       if (!dest) return null;
       await invoke("export_sheet", { path, dest });
       return dest;
     },
+    async exportText(content, suggestedName) {
+      const dest = await pickExportPath(suggestedName);
+      if (!dest) return null;
+      await invoke("export_text", { content, dest });
+      return dest;
+    },
+    readMeta: () => invoke("read_meta"),
+    writeMeta: (json) => invoke("write_meta", { json }),
   };
+
+  async function pickExportPath(suggestedName: string): Promise<string | null> {
+    const safe = suggestedName.replace(/[\\/:*?"<>|]/g, "").trim() || "Sheet";
+    return save({
+      defaultPath: `${safe}.docx`,
+      filters: [
+        { name: "Word document", extensions: ["docx"] },
+        { name: "PDF (needs a LaTeX engine)", extensions: ["pdf"] },
+        { name: "HTML", extensions: ["html"] },
+        { name: "OpenDocument", extensions: ["odt"] },
+        { name: "EPUB", extensions: ["epub"] },
+      ],
+    });
+  }
 }
 
 // ---------------------------------------------------------------- browser stand-in
@@ -89,6 +106,17 @@ interface MockStore {
 }
 
 const KEY = "scriptorium-web-library";
+const META_KEY = "scriptorium-web-meta";
+
+// Browser preview: "export" downloads the Markdown itself.
+function download(text: string, name: string): string {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+  a.download = `${name || "Sheet"}.md`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  return a.download;
+}
 
 function parentOf(p: string): string {
   const i = p.lastIndexOf("/");
@@ -256,14 +284,18 @@ function webApi(): Api {
       return hits.slice(0, 100);
     },
     async exportSheet(path, suggestedName) {
-      // Browser preview: download the Markdown itself.
-      const blob = new Blob([store.files[path]?.content ?? ""], { type: "text/markdown" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${suggestedName || "Sheet"}.md`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      return a.download;
+      return download(store.files[path]?.content ?? "", suggestedName);
+    },
+    async exportText(content, suggestedName) {
+      return download(content, suggestedName);
+    },
+    readMeta: async () => localStorage.getItem(META_KEY) ?? "",
+    async writeMeta(json) {
+      try {
+        localStorage.setItem(META_KEY, json);
+      } catch {
+        /* storage unavailable */
+      }
     },
   };
 }

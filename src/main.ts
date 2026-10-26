@@ -1,6 +1,7 @@
 import "./styles.css";
 import { loadApi, type Api, type Group, type SearchHit, type SheetInfo } from "./api";
 import { createEditor, makeState } from "./editor";
+import { arrange, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
 
 // ------------------------------------------------------------------ small helpers
 
@@ -51,6 +52,9 @@ const ICONS: Record<string, string> = {
   export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
+  funnel: '<path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/>',
+  torn: '<path d="M6 4h12v13l-2 2.2-2-2.2-2 2.2-2-2.2-2 2.2-2-2.2z"/><path d="M9 9h6M9 12.5h4"/>',
+  glue: '<path d="M10 14a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/>',
   all: '<path d="M7 4h10a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M9 4v16"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   doc: '<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10.5a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/>',
@@ -190,13 +194,20 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
 async function main(): Promise<void> {
   const api: Api = await loadApi();
 
-  type View = { kind: "all" } | { kind: "recent" } | { kind: "group"; path: string };
+  type View = { kind: "all" } | { kind: "recent" } | { kind: "filter"; id: string } | { kind: "group"; path: string };
   const S = {
     tree: null as Group | null,
     view: { kind: "group", path: "" } as View,
     sheets: [] as SheetInfo[],
     hits: null as SearchHit[] | null,
     current: null as string | null,
+    /** when the open text is several glued sheets: their paths, in reading order */
+    glue: null as string[] | null,
+    savedParts: [] as string[],
+    meta: emptyMeta() as Meta,
+    /** keys (first path) of the selected list rows */
+    sel: new Set<string>(),
+    anchor: null as string | null,
     version: 0,
     savedVersion: 0,
     typewriter: ls("typewriter") === "1",
@@ -222,7 +233,7 @@ async function main(): Promise<void> {
   // -------- editor
   const view = createEditor(el("editor"));
   const hooks = { onChange: onDocChanged, isTypewriter: () => S.typewriter };
-  const setDoc = (text: string) => view.setState(makeState(text, hooks));
+  const setDoc = (text: string, glued = false) => view.setState(makeState(text, hooks, glued));
   setDoc("");
 
   // -------- icons on static buttons
@@ -267,17 +278,54 @@ async function main(): Promise<void> {
 
   // -------- status bar
   function updateStats(): void {
-    const text = view.state.doc.toString();
+    const text = view.state.doc.toString().split(GLUE_JOIN).join("\n\n");
     const words = (text.match(/\S+/g) ?? []).length;
     el("stWords").textContent = `${words.toLocaleString()} ${words === 1 ? "word" : "words"}`;
     el("stChars").textContent = `${text.length.toLocaleString()} characters`;
-    el("stRead").textContent = `${Math.max(words ? 1 : 0, Math.ceil(words / 220))} min read`;
+    el("stRead").textContent = isMaterial(S.current) ? "Material · not counted in totals" : `${Math.max(words ? 1 : 0, Math.ceil(words / 220))} min read`;
   }
   function setSave(text: string): void {
     el("stSave").textContent = text;
   }
   function setHasNone(none: boolean): void {
     document.body.classList.toggle("has-none", none);
+  }
+
+  // -------- structure metadata (order, material, glue, filters)
+  let metaChain: Promise<void> = Promise.resolve();
+  function persistMeta(): void {
+    const json = JSON.stringify(S.meta);
+    metaChain = metaChain.then(() => api.writeMeta(json)).catch((e) => toast(`Couldn't save structure: ${msg(e)}`));
+  }
+  const isMaterial = (path: string | null): boolean => !!path && S.meta.material.includes(path);
+  const isOpen = (path: string): boolean => path === S.current || !!S.glue?.includes(path);
+
+  function applyMaterialClass(): void {
+    document.body.classList.toggle("is-material", isMaterial(S.current));
+    updateStats();
+  }
+  function refreshCrumb(): void {
+    if (!S.current) {
+      crumb.textContent = "";
+      return;
+    }
+    const name = (S.current.split("/").pop() ?? "").replace(/\.md$/i, "");
+    crumb.textContent = `${groupOf(S.current)}  ›  ${name}${S.glue ? `  +${S.glue.length - 1} glued` : ""}`;
+  }
+
+  /** Every path-changing operation (rename, move, untitled → named) funnels through here. */
+  function applyRemap(fn: (p: string) => string): void {
+    remapMeta(S.meta, fn);
+    persistMeta();
+    if (S.current) S.current = fn(S.current);
+    if (S.glue) S.glue = S.glue.map(fn);
+    S.sel = new Set([...S.sel].map(fn));
+    S.anchor = S.anchor ? fn(S.anchor) : null;
+    if (S.view.kind === "group") S.view = { kind: "group", path: fn(S.view.path) };
+    S.collapsed = new Set([...S.collapsed].map(fn));
+    lsSet("collapsed", JSON.stringify([...S.collapsed]));
+    refreshCrumb();
+    applyMaterialClass();
   }
 
   // -------- saving
@@ -296,13 +344,20 @@ async function main(): Promise<void> {
   async function doSave(): Promise<void> {
     if (!S.current || S.version === S.savedVersion) return;
     const v = S.version;
-    const path = S.current;
-    const np = await api.writeSheet(path, view.state.doc.toString());
-    S.savedVersion = v;
-    if (S.current === path && np !== path) {
-      S.current = np;
-      crumb.textContent = crumbFor(np);
+    const text = view.state.doc.toString();
+    const paths = S.glue ?? [S.current];
+    const parts = S.glue ? text.split(GLUE_JOIN) : [text];
+    if (parts.length !== paths.length) throw new Error("a divider between glued sheets was damaged");
+    const renamed = new Map<string, string>();
+    for (let i = 0; i < paths.length; i++) {
+      if (parts[i] === S.savedParts[i]) continue;
+      const np = await api.writeSheet(paths[i], parts[i]);
+      S.savedParts[i] = parts[i];
+      if (np !== paths[i]) renamed.set(paths[i], np);
     }
+    S.savedVersion = v;
+    // an Untitled sheet is renamed after its first line when it gets one
+    if (renamed.size && S.current === paths[0]) applyRemap((p) => renamed.get(p) ?? p);
     setSave(S.version === v ? "Saved" : "Editing…");
     scheduleListRefresh();
   }
@@ -349,14 +404,24 @@ async function main(): Promise<void> {
   const RECENT_SECS = 7 * 86400;
   async function loadSheets(): Promise<SheetInfo[]> {
     const v = S.view;
-    if (v.kind === "group") return api.listSheets(v.path, false);
-    const all = await api.listSheets("", true);
-    if (v.kind === "all") return all;
-    const since = Date.now() / 1000 - RECENT_SECS;
-    return all.filter((x) => x.modified >= since);
+    if (v.kind === "group") return arrange(S.meta, v.path, await api.listSheets(v.path, false));
+    if (v.kind === "all") return api.listSheets("", true);
+    if (v.kind === "recent") {
+      const since = Date.now() / 1000 - RECENT_SECS;
+      return (await api.listSheets("", true)).filter((x) => x.modified >= since);
+    }
+    // a saved filter: text, group and recency, all of which must match
+    const f = S.meta.filters.find((x) => x.id === v.id);
+    if (!f) return [];
+    const since = f.days ? Date.now() / 1000 - f.days * 86400 : 0;
+    let found = (await api.listSheets(f.group, true)).filter((x) => x.modified >= since);
+    if (f.query.trim()) {
+      const hits = new Set((await api.search(f.query)).map((x) => x.path));
+      found = found.filter((x) => hits.has(x.path));
+    }
+    return found;
   }
 
-  const totalCount = (g: Group): number => g.count + g.children.reduce((n, c) => n + totalCount(c), 0);
   const viewGroupPath = (): string => (S.view.kind === "group" ? S.view.path : "");
 
   // -------- library tree
@@ -372,6 +437,33 @@ async function main(): Promise<void> {
         h("span", { class: "name" }, label),
       );
     treeEl.append(h("div", { class: "tree-label" }, "Library"), smartRow("all", "all", "All"), smartRow("recent", "clock", "Last 7 Days"));
+
+    treeEl.append(
+      h(
+        "div",
+        { class: "tree-label with-btn" },
+        h("span", {}, "Filters"),
+        h("button", { class: "icon-btn mini", title: "New filter", "aria-label": "New filter", onclick: () => void newFilter() }, icon("plus")),
+      ),
+    );
+    if (!S.meta.filters.length) treeEl.append(h("div", { class: "tree-hint" }, "Smart folders: save a search to keep it here."));
+    for (const f of S.meta.filters) {
+      const row = h(
+        "div",
+        { class: "row" + (S.view.kind === "filter" && S.view.id === f.id ? " active" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind: "filter", id: f.id }) },
+        h("span", { class: "chev" }),
+        icon("funnel"),
+        h("span", { class: "name" }, f.name),
+      );
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, [
+          { label: "Edit filter…", run: () => void editFilter(f) },
+          { label: "Delete filter", run: () => void deleteFilter(f), danger: true, sep: true },
+        ]);
+      });
+      treeEl.append(row);
+    }
 
     const rowFor = (g: Group, depth: number, label: string, ico: string): HTMLElement => {
       const isRoot = g.path === "";
@@ -409,8 +501,10 @@ async function main(): Promise<void> {
       row.addEventListener("drop", (e) => {
         e.preventDefault();
         row.classList.remove("drop");
+        const raw = e.dataTransfer?.getData("text/x-scriptorium-paths");
         const src = e.dataTransfer?.getData("text/x-scriptorium");
-        if (src) void moveTo(src, g.path);
+        const paths = raw ? (JSON.parse(raw) as string[]) : src ? [src] : [];
+        if (paths.length) void moveTo(paths, g.path);
       });
       return row;
     };
@@ -428,6 +522,7 @@ async function main(): Promise<void> {
     const items: MenuItem[] = [
       { label: "New sheet here", run: () => void newSheetIn(g.path) },
       { label: "New group inside…", run: () => void newGroup(g.path) },
+      { label: "Export group…", run: () => void exportGroup(g), sep: true },
     ];
     if (g.path !== "") {
       items.push(
@@ -446,32 +541,63 @@ async function main(): Promise<void> {
   }
 
   // -------- sheet list
-  function renderSheets(): void {
-    sheetsEl.replaceChildren();
-    if (S.hits) {
-      listTitle.textContent = `${S.hits.length} ${S.hits.length === 1 ? "result" : "results"}`;
-      if (!S.hits.length) sheetsEl.append(h("div", { class: "none" }, "Nothing found."));
-      for (const hit of S.hits) {
-        sheetsEl.append(sheetRow(hit.path, hit.title, hit.snippet, groupOf(hit.path)));
+  /** One row in the list: a single sheet, or a run of glued sheets shown as one. */
+  interface Unit {
+    key: string;
+    paths: string[];
+    sheets: SheetInfo[];
+  }
+  let units: Unit[] = [];
+  let dragKeys: string[] = [];
+
+  function unitsOf(sheets: SheetInfo[]): Unit[] {
+    const byPath = new Map(sheets.map((x) => [x.path, x]));
+    const used = new Set<string>();
+    const out: Unit[] = [];
+    sheets.forEach((x, i) => {
+      if (used.has(x.path)) return;
+      const g = glueOf(S.meta, x.path);
+      // glued sheets collapse into one row only while they sit next to each other in this list
+      if (g && g[0] === x.path && g.every((p, j) => sheets[i + j]?.path === p)) {
+        g.forEach((p) => used.add(p));
+        out.push({ key: x.path, paths: g, sheets: g.map((p) => byPath.get(p)!) });
+      } else {
+        used.add(x.path);
+        out.push({ key: x.path, paths: [x.path], sheets: [x] });
       }
-      return;
-    }
-    listTitle.textContent =
-      S.view.kind === "all" ? "All" : S.view.kind === "recent" ? "Last 7 Days" : S.view.path === "" ? "Inbox" : S.view.path.split("/").pop() ?? "";
-    if (!S.sheets.length) {
-      sheetsEl.append(h("div", { class: "none" }, S.view.kind === "recent" ? "Nothing written in the last 7 days." : "No sheets here yet."));
-      return;
-    }
-    for (const s of S.sheets) {
-      const meta = [whenText(s.modified), `${s.words.toLocaleString()} ${s.words === 1 ? "word" : "words"}`, S.view.kind !== "group" ? groupOf(s.path) : ""]
-        .filter(Boolean)
-        .join(" · ");
-      sheetsEl.append(sheetRow(s.path, s.title, s.preview, meta));
-    }
+    });
+    return out;
   }
 
-  function crumbFor(path: string): string {
-    return groupOf(path) + "  ›  " + (path.split("/").pop() ?? "").replace(/\.md$/i, "");
+  const plural = (n: number, one: string, many = one + "s"): string => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+  const inGroupView = (): boolean => S.view.kind === "group" && !S.hits;
+
+  function renderSheets(): void {
+    sheetsEl.replaceChildren();
+    listTitle.replaceChildren();
+    if (S.hits) {
+      listTitle.append(
+        h("span", { class: "lt-name" }, plural(S.hits.length, "result")),
+        h("button", { class: "lt-btn", onclick: () => void newFilter({ query: searchEl.value.trim() }) }, "Save as filter"),
+      );
+      if (!S.hits.length) sheetsEl.append(h("div", { class: "none" }, "Nothing found."));
+      for (const hit of S.hits) sheetsEl.append(hitRow(hit));
+      return;
+    }
+    const v = S.view;
+    const name =
+      v.kind === "all" ? "All" : v.kind === "recent" ? "Last 7 Days" : v.kind === "filter" ? (S.meta.filters.find((f) => f.id === v.id)?.name ?? "Filter") : v.path === "" ? "Inbox" : (v.path.split("/").pop() ?? "");
+    const words = S.sheets.filter((x) => !isMaterial(x.path)).reduce((n, x) => n + x.words, 0);
+    listTitle.append(
+      h("span", { class: "lt-name" }, name),
+      h("span", { class: "lt-count", title: "Material sheets are not counted" }, `${plural(S.sheets.length, "sheet")} · ${plural(words, "word")}`),
+    );
+    units = unitsOf(S.sheets);
+    if (!units.length) {
+      sheetsEl.append(h("div", { class: "none" }, v.kind === "recent" ? "Nothing written in the last 7 days." : v.kind === "filter" ? "No sheets match this filter." : "No sheets here yet."));
+      return;
+    }
+    for (const u of units) sheetsEl.append(unitRow(u));
   }
 
   function groupOf(path: string): string {
@@ -479,46 +605,207 @@ async function main(): Promise<void> {
     return i < 0 ? "Inbox" : path.slice(0, i);
   }
 
-  function sheetRow(path: string, title: string, preview: string, meta: string): HTMLElement {
+  function unitRow(u: Unit): HTMLElement {
+    const first = u.sheets[0];
+    const mat = isMaterial(first.path);
+    const glued = u.sheets.length > 1;
+    const words = u.sheets.reduce((n, x) => n + x.words, 0);
+    const meta = [
+      whenText(Math.max(...u.sheets.map((x) => x.modified))),
+      glued ? `${u.sheets.length} glued sheets · ${plural(words, "word")}` : plural(words, "word"),
+      S.view.kind !== "group" ? groupOf(first.path) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const badge = mat ? icon("torn") : glued ? icon("glue") : null;
     const row = h(
       "div",
-      { class: "sheet-item" + (path === S.current ? " active" : ""), draggable: "true", "data-path": path, onclick: () => void openSheet(path) },
-      h("div", { class: "si-title" }, title || "Untitled"),
-      h("div", { class: "si-prev" }, preview),
-      meta ? h("div", { class: "si-meta" }, meta) : null,
+      { class: "sheet-item" + (S.sel.has(u.key) ? " selected" : "") + (mat ? " material" : "") + (glued ? " glued" : ""), draggable: "true", "data-key": u.key },
+      h("div", { class: "si-head" }, h("div", { class: "si-title" }, first.title || "Untitled"), badge ? h("span", { class: "si-badge" }, badge) : null),
+      h("div", { class: "si-prev" }, first.preview),
+      h("div", { class: "si-meta" }, meta),
     );
-    row.addEventListener("dragstart", (e) => {
-      e.dataTransfer?.setData("text/x-scriptorium", path);
-      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    row.addEventListener("click", (e) => clickUnit(u, e));
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (!S.sel.has(u.key)) {
+        S.sel = new Set([u.key]);
+        S.anchor = u.key;
+        renderSheets();
+      }
+      showMenu(e.clientX, e.clientY, unitMenu(u));
     });
+    row.addEventListener("dragstart", (e) => {
+      dragKeys = S.sel.has(u.key) ? units.filter((x) => S.sel.has(x.key)).map((x) => x.key) : [u.key];
+      const paths = units.filter((x) => dragKeys.includes(x.key)).flatMap((x) => x.paths);
+      if (!e.dataTransfer) return;
+      e.dataTransfer.setData("text/x-scriptorium", paths[0]);
+      e.dataTransfer.setData("text/x-scriptorium-paths", JSON.stringify(paths));
+      if (inGroupView()) e.dataTransfer.setData("text/x-scriptorium-order", "1");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    const above = (e: DragEvent) => e.clientY - row.getBoundingClientRect().top < row.clientHeight / 2;
+    const clear = () => row.classList.remove("drop-above", "drop-below");
+    row.addEventListener("dragover", (e) => {
+      if (!inGroupView() || !e.dataTransfer?.types.includes("text/x-scriptorium-order") || dragKeys.includes(u.key)) return;
+      e.preventDefault();
+      const up = above(e);
+      row.classList.toggle("drop-above", up);
+      row.classList.toggle("drop-below", !up);
+    });
+    row.addEventListener("dragleave", clear);
+    row.addEventListener("dragend", () => {
+      sheetsEl.querySelectorAll(".drop-above, .drop-below").forEach((n) => n.classList.remove("drop-above", "drop-below"));
+    });
+    row.addEventListener("drop", (e) => {
+      if (!inGroupView() || !e.dataTransfer?.types.includes("text/x-scriptorium-order") || dragKeys.includes(u.key)) return;
+      e.preventDefault();
+      clear();
+      void reorder(u.key, above(e));
+    });
+    return row;
+  }
+
+  function hitRow(hit: SearchHit): HTMLElement {
+    const row = h(
+      "div",
+      { class: "sheet-item" + (isOpen(hit.path) ? " selected" : ""), onclick: () => void openSheet(hit.path) },
+      h("div", { class: "si-head" }, h("div", { class: "si-title" }, hit.title || "Untitled")),
+      h("div", { class: "si-prev" }, hit.snippet),
+      h("div", { class: "si-meta" }, groupOf(hit.path)),
+    );
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       showMenu(e.clientX, e.clientY, [
-        { label: "Open", run: () => void openSheet(path) },
-        { label: "Export…", run: () => void exportSheet(path) },
-        { label: "Move to library root", run: () => void moveTo(path, "") },
-        { label: "Delete sheet", run: () => void deleteSheet(path), danger: true, sep: true },
+        { label: "Open", run: () => void openSheet(hit.path) },
+        { label: "Export…", run: () => void exportSheet(hit.path) },
+        { label: "Delete sheet", run: () => void deleteSheets([hit.path]), danger: true, sep: true },
       ]);
     });
     return row;
   }
 
+  function clickUnit(u: Unit, e: MouseEvent): void {
+    if (e.metaKey || e.ctrlKey) {
+      if (S.sel.has(u.key)) S.sel.delete(u.key);
+      else S.sel.add(u.key);
+      S.anchor = u.key;
+      renderSheets();
+      return;
+    }
+    if (e.shiftKey && S.anchor) {
+      const a = units.findIndex((x) => x.key === S.anchor);
+      const b = units.findIndex((x) => x.key === u.key);
+      if (a >= 0 && b >= 0) {
+        S.sel = new Set(units.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.key));
+        renderSheets();
+        return;
+      }
+    }
+    void openSheet(u.paths[0]);
+  }
+
+  function canGlue(targets: Unit[]): boolean {
+    if (!inGroupView() || targets.length < 2 || targets.some((t) => t.paths.some((p) => isMaterial(p)))) return false;
+    const at = targets.map((t) => units.indexOf(t)).sort((a, b) => a - b);
+    return at.every((n, i) => n === at[0] + i);
+  }
+
+  function unitMenu(u: Unit): MenuItem[] {
+    const targets = S.sel.has(u.key) && S.sel.size > 1 ? units.filter((x) => S.sel.has(x.key)) : [u];
+    const paths = targets.flatMap((t) => t.paths);
+    const allMaterial = paths.every((p) => isMaterial(p));
+    const items: MenuItem[] = [{ label: "Open", run: () => void openSheet(u.paths[0]) }];
+    if (canGlue(targets)) items.push({ label: `Glue ${paths.length} sheets`, run: () => void glueUnits(targets) });
+    if (targets.length === 1 && u.paths.length > 1) items.push({ label: "Unglue sheets", run: () => void unglue(u) });
+    items.push({ label: allMaterial ? "Remove material mark" : "Mark as material", run: () => void setMaterial(paths, !allMaterial) });
+    if (targets.length === 1) items.push({ label: "Export…", run: () => void exportSheet(u.paths[0]) });
+    items.push(
+      { label: "Move to Inbox", run: () => void moveTo(paths, "") },
+      { label: paths.length > 1 ? `Delete ${paths.length} sheets` : "Delete sheet", run: () => void deleteSheets(paths), danger: true, sep: true },
+    );
+    return items;
+  }
+
+  // -------- material, glue, order
+  async function setMaterial(paths: string[], on: boolean): Promise<void> {
+    if (on && paths.some((p) => glueOf(S.meta, p))) {
+      toast("Unglue these sheets before marking them as material");
+      return;
+    }
+    const set = new Set(S.meta.material);
+    for (const p of paths) {
+      if (on) set.add(p);
+      else set.delete(p);
+    }
+    S.meta.material = [...set];
+    persistMeta();
+    applyMaterialClass();
+    renderSheets();
+  }
+
+  async function reopen(path: string): Promise<void> {
+    S.current = null;
+    S.glue = null;
+    await openSheet(path);
+  }
+
+  async function glueUnits(targets: Unit[]): Promise<void> {
+    await flushSave();
+    const paths = targets.flatMap((t) => t.paths);
+    S.meta.glue = S.meta.glue.filter((g) => !g.some((p) => paths.includes(p)));
+    S.meta.glue.push(paths);
+    S.meta.order[viewGroupPath()] = units.flatMap((x) => x.paths);
+    persistMeta();
+    await reopen(paths[0]);
+    await refresh();
+  }
+
+  async function unglue(u: Unit): Promise<void> {
+    await flushSave();
+    S.meta.glue = S.meta.glue.filter((g) => g[0] !== u.paths[0]);
+    persistMeta();
+    if (u.paths.some((p) => isOpen(p))) await reopen(S.current ?? u.paths[0]);
+    await refresh();
+  }
+
+  async function reorder(targetKey: string, before: boolean): Promise<void> {
+    const moving = units.filter((x) => dragKeys.includes(x.key));
+    const rest = units.filter((x) => !dragKeys.includes(x.key));
+    const i = rest.findIndex((x) => x.key === targetKey);
+    if (i < 0 || !moving.length) return;
+    rest.splice(before ? i : i + 1, 0, ...moving);
+    S.meta.order[viewGroupPath()] = rest.flatMap((x) => x.paths);
+    persistMeta();
+    await refresh();
+  }
+
   // -------- opening / closing sheets
   async function openSheet(path: string): Promise<void> {
-    if (path === S.current) {
+    const g = glueOf(S.meta, path);
+    const key = g?.[0] ?? path;
+    if (isOpen(path)) {
+      S.sel = new Set([key]);
+      S.anchor = key;
+      renderSheets();
       view.focus();
       return;
     }
     await flushSave();
+    const paths = g ?? [path];
     try {
-      const text = await api.readSheet(path);
-      S.current = path;
-      setDoc(text);
+      const texts = await Promise.all(paths.map((p) => api.readSheet(p)));
+      S.current = paths[0];
+      S.glue = g;
+      S.savedParts = texts;
+      setDoc(texts.join(GLUE_JOIN), !!g);
       S.version = S.savedVersion = 0;
+      S.sel = new Set([key]);
+      S.anchor = key;
       setHasNone(false);
-      updateStats();
       setSave("");
-      crumb.textContent = crumbFor(path);
+      refreshCrumb();
+      applyMaterialClass();
       renderSheets();
       view.focus();
     } catch (e) {
@@ -529,11 +816,13 @@ async function main(): Promise<void> {
 
   function closeEditor(): void {
     S.current = null;
+    S.glue = null;
+    S.savedParts = [];
     setDoc("");
     S.version = S.savedVersion = 0;
     setHasNone(true);
-    crumb.textContent = "";
-    updateStats();
+    refreshCrumb();
+    applyMaterialClass();
   }
 
   // -------- actions
@@ -543,7 +832,11 @@ async function main(): Promise<void> {
       searchEl.value = "";
       S.hits = null;
       const p = await api.createSheet(group);
-      if (S.view.kind === "group" && S.view.path !== group) S.view = { kind: "group", path: group };
+      // a new sheet goes to the end of the group, after the others in their current order
+      const others = arrange(S.meta, group, await api.listSheets(group, false)).map((x) => x.path).filter((x) => x !== p);
+      S.meta.order[group] = [...others, p];
+      persistMeta();
+      if (S.view.kind !== "group" || S.view.path !== group) S.view = { kind: "group", path: group };
       await refresh();
       await openSheet(p);
     } catch (e) {
@@ -571,18 +864,20 @@ async function main(): Promise<void> {
     await flushSave();
     try {
       const np = await api.renameItem(g.path, name);
-      const remap = (p: string) => (p === g.path || p.startsWith(g.path + "/") ? np + p.slice(g.path.length) : p);
-      if (S.view.kind === "group") S.view = { kind: "group", path: remap(S.view.path) };
-      if (S.current) {
-        S.current = remap(S.current);
-        crumb.textContent = crumbFor(S.current);
-      }
-      S.collapsed = new Set([...S.collapsed].map(remap));
-      lsSet("collapsed", JSON.stringify([...S.collapsed]));
+      applyRemap((p) => (p === g.path || p.startsWith(g.path + "/") ? np + p.slice(g.path.length) : p));
       await refresh();
     } catch (e) {
       toast(msg(e));
     }
+  }
+
+  /** Forget deleted paths: structure, selection, the open sheet and the current view. */
+  function afterDelete(gone: (p: string) => boolean): void {
+    dropFromMeta(S.meta, gone);
+    persistMeta();
+    S.sel = new Set([...S.sel].filter((k) => !gone(k)));
+    if (S.view.kind === "group" && gone(S.view.path)) S.view = { kind: "group", path: "" };
+    if (S.current && (gone(S.current) || S.glue?.some(gone))) closeEditor();
   }
 
   async function deleteGroup(g: Group): Promise<void> {
@@ -591,9 +886,7 @@ async function main(): Promise<void> {
     await flushSave();
     try {
       await api.deleteItem(g.path);
-      const inside = (p: string) => p === g.path || p.startsWith(g.path + "/");
-      if (S.view.kind === "group" && inside(S.view.path)) S.view = { kind: "group", path: "" };
-      if (S.current && inside(S.current)) closeEditor();
+      afterDelete((p) => p === g.path || p.startsWith(g.path + "/"));
       await refresh();
       toast("Moved to .trash");
     } catch (e) {
@@ -601,43 +894,143 @@ async function main(): Promise<void> {
     }
   }
 
-  async function deleteSheet(path: string): Promise<void> {
+  async function deleteSheets(paths: string[]): Promise<void> {
     await flushSave();
     try {
-      await api.deleteItem(path);
-      if (S.current === path) closeEditor();
-      if (S.hits) S.hits = S.hits.filter((h2) => h2.path !== path);
-      await refresh();
-      toast("Moved to .trash");
+      for (const p of paths) await api.deleteItem(p);
     } catch (e) {
       toast(msg(e));
     }
+    afterDelete((p) => paths.includes(p));
+    if (S.hits) S.hits = S.hits.filter((x) => !paths.includes(x.path));
+    await refresh();
+    toast("Moved to .trash");
   }
 
-  async function moveTo(path: string, group: string): Promise<void> {
+  async function moveTo(paths: string[], group: string): Promise<void> {
     await flushSave();
+    const moved = new Map<string, string>();
     try {
-      const np = await api.moveItem(path, group);
-      if (S.current === path) {
-        S.current = np;
-        crumb.textContent = crumbFor(np);
-      }
-      await refresh();
+      for (const p of paths) moved.set(p, await api.moveItem(p, group));
     } catch (e) {
       toast(msg(e));
     }
+    if (moved.size) applyRemap((p) => moved.get(p) ?? p);
+    await refresh();
   }
+
+  // -------- export
+  const titleOf = (path: string): string => S.sheets.find((x) => x.path === path)?.title ?? (path.split("/").pop() ?? "Sheet").replace(/\.md$/i, "");
 
   async function exportSheet(path = S.current ?? ""): Promise<void> {
     if (!path) return;
     await flushSave();
-    const title = S.sheets.find((s) => s.path === path)?.title ?? (path.split("/").pop() ?? "Sheet").replace(/\.md$/i, "");
     try {
-      const out = await api.exportSheet(path, title);
+      const glued = glueOf(S.meta, path);
+      const out = glued
+        ? await api.exportText((await Promise.all(glued.map((p) => api.readSheet(p)))).join("\n\n"), titleOf(glued[0]))
+        : await api.exportSheet(path, titleOf(path));
       if (out) toast(`Exported to ${out}`);
     } catch (e) {
       toast(msg(e));
     }
+  }
+
+  /** A whole group as one document, in the order you arranged it. Material sheets are left out. */
+  async function exportGroup(g: Group): Promise<void> {
+    await flushSave();
+    try {
+      const parts: string[] = [];
+      const walk = async (node: Group): Promise<void> => {
+        for (const x of arrange(S.meta, node.path, await api.listSheets(node.path, false))) {
+          if (!isMaterial(x.path)) parts.push(await api.readSheet(x.path));
+        }
+        for (const c of node.children) await walk(c);
+      };
+      await walk(g);
+      if (!parts.length) {
+        toast("Nothing to export: this group has no sheets that aren't material");
+        return;
+      }
+      const out = await api.exportText(parts.join("\n\n"), g.path === "" ? "Library" : g.name);
+      if (out) toast(`Exported to ${out}`);
+    } catch (e) {
+      toast(msg(e));
+    }
+  }
+
+  // -------- filters
+  async function askFilter(init: Partial<Filter>, title: string, okLabel: string): Promise<Omit<Filter, "id"> | null> {
+    const groups: string[] = [];
+    const walk = (g: Group): void => {
+      if (g.path) groups.push(g.path);
+      g.children.forEach(walk);
+    };
+    if (S.tree) walk(S.tree);
+    const r = await modal((close) => {
+      const name = h("input", { type: "text", value: init.name ?? "", placeholder: "Name", spellcheck: "false" });
+      const query = h("input", { type: "text", value: init.query ?? "", placeholder: "Sheet contains… (for example: draft)", spellcheck: "false" });
+      const grp = h("select", {}, h("option", { value: "" }, "Anywhere in the library"), ...groups.map((g) => h("option", { value: g }, g)));
+      grp.value = init.group ?? "";
+      const days = h(
+        "select",
+        {},
+        ...(
+          [
+            [0, "Changed any time"],
+            [1, "Changed in the last day"],
+            [7, "Changed in the last 7 days"],
+            [30, "Changed in the last 30 days"],
+          ] as const
+        ).map(([v, l]) => h("option", { value: String(v) }, l)),
+      );
+      days.value = String(init.days ?? 0);
+      const ok = () => {
+        const q = query.value.trim();
+        if (!q && !grp.value && !Number(days.value)) {
+          query.focus();
+          return;
+        }
+        close(JSON.stringify({ name: name.value.trim() || q || grp.value || "Filter", query: q, group: grp.value, days: Number(days.value) }));
+      };
+      for (const i of [name, query]) i.addEventListener("keydown", (e) => e.key === "Enter" && ok());
+      queueMicrotask(() => (init.name || !init.query ? name : query).focus());
+      return h(
+        "div",
+        { class: "modal" },
+        h("h3", {}, title),
+        name,
+        query,
+        grp,
+        days,
+        h("div", { class: "actions" }, h("button", { class: "btn", onclick: () => close(null) }, "Cancel"), h("button", { class: "btn primary", onclick: ok }, okLabel)),
+      );
+    });
+    return r ? (JSON.parse(r) as Omit<Filter, "id">) : null;
+  }
+
+  async function newFilter(init: Partial<Filter> = {}): Promise<void> {
+    const f = await askFilter(init, "New filter", "Create");
+    if (!f) return;
+    const filter: Filter = { ...f, id: `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` };
+    S.meta.filters.push(filter);
+    persistMeta();
+    await selectView({ kind: "filter", id: filter.id });
+  }
+
+  async function editFilter(f: Filter): Promise<void> {
+    const next = await askFilter(f, "Edit filter", "Save");
+    if (!next) return;
+    Object.assign(f, next);
+    persistMeta();
+    await refresh();
+  }
+
+  async function deleteFilter(f: Filter): Promise<void> {
+    S.meta.filters = S.meta.filters.filter((x) => x.id !== f.id);
+    persistMeta();
+    if (S.view.kind === "filter" && S.view.id === f.id) S.view = { kind: "group", path: "" };
+    await refresh();
   }
 
   // -------- search
@@ -735,6 +1128,7 @@ async function main(): Promise<void> {
   // -------- start
   setHasNone(true);
   updateStats();
+  S.meta = parseMeta(await api.readMeta().catch(() => ""));
   await refresh();
   // Open the most recent sheet so the app starts in your writing, not an empty room.
   if (S.sheets[0]) await openSheet(S.sheets[0].path);
