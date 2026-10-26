@@ -8,10 +8,10 @@ import { tags as t } from "@lezer/highlight";
 
 // Markdown marks (#, **, >, ...) are dimmed so the text reads as prose, not as code.
 const prose = HighlightStyle.define([
-  { tag: t.heading1, fontSize: "1.65em", fontWeight: "700", lineHeight: "1.3" },
-  { tag: t.heading2, fontSize: "1.4em", fontWeight: "700" },
-  { tag: t.heading3, fontSize: "1.2em", fontWeight: "650" },
-  { tag: [t.heading4, t.heading5, t.heading6], fontWeight: "650" },
+  { tag: t.heading1, fontSize: "1.55em", fontWeight: "700", color: "var(--head)" },
+  { tag: t.heading2, fontSize: "1.35em", fontWeight: "700", color: "var(--head)" },
+  { tag: t.heading3, fontSize: "1.15em", fontWeight: "700", color: "var(--head)" },
+  { tag: [t.heading4, t.heading5, t.heading6], fontWeight: "700", color: "var(--head)" },
   { tag: t.strong, fontWeight: "700" },
   { tag: t.emphasis, fontStyle: "italic" },
   { tag: t.strikethrough, textDecoration: "line-through" },
@@ -19,18 +19,18 @@ const prose = HighlightStyle.define([
   { tag: t.url, color: "var(--muted)" },
   { tag: t.monospace, fontFamily: "var(--mono)", fontSize: "0.88em", backgroundColor: "var(--code-bg)" },
   { tag: t.quote, color: "var(--muted)", fontStyle: "italic" },
-  { tag: [t.processingInstruction, t.contentSeparator], color: "var(--mark)", fontWeight: "400" },
+  { tag: [t.processingInstruction, t.contentSeparator], color: "var(--mark)" },
 ]);
 
 const theme = EditorView.theme({
   "&": { height: "100%", backgroundColor: "var(--bg)", color: "var(--text)" },
   "&.cm-focused": { outline: "none" },
-  ".cm-scroller": { fontFamily: "var(--font-write)", lineHeight: "1.75", overflow: "auto" },
+  ".cm-scroller": { fontFamily: "var(--font-write)", lineHeight: "2", overflow: "auto" },
   ".cm-content": {
-    maxWidth: "44rem",
+    maxWidth: "50rem",
     margin: "0 auto",
-    padding: "2.5rem 1.5rem 30vh",
-    fontSize: "1.15rem",
+    padding: "3rem 2rem 30vh",
+    fontSize: "1.3rem",
     caretColor: "var(--accent)",
   },
   ".cm-line": { padding: "0" },

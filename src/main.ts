@@ -51,6 +51,10 @@ const ICONS: Record<string, string> = {
   export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
+  all: '<path d="M7 4h10a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M9 4v16"/>',
+  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  doc: '<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10.5a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/>',
+  inbox: '<path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>',
 };
 function icon(name: string): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -186,7 +190,7 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
 async function main(): Promise<void> {
   const api: Api = await loadApi();
 
-  type View = { kind: "all" } | { kind: "group"; path: string };
+  type View = { kind: "all" } | { kind: "recent" } | { kind: "group"; path: string };
   const S = {
     tree: null as Group | null,
     view: { kind: "group", path: "" } as View,
@@ -327,7 +331,7 @@ async function main(): Promise<void> {
   async function refresh(): Promise<void> {
     try {
       S.tree = await api.listTree();
-      S.sheets = await api.listSheets(S.view.kind === "all" ? "" : S.view.path, S.view.kind === "all");
+      S.sheets = await loadSheets();
     } catch (e) {
       // The group we were looking at may be gone; fall back to the root.
       S.view = { kind: "group", path: "" };
@@ -342,6 +346,16 @@ async function main(): Promise<void> {
     renderSheets();
   }
 
+  const RECENT_SECS = 7 * 86400;
+  async function loadSheets(): Promise<SheetInfo[]> {
+    const v = S.view;
+    if (v.kind === "group") return api.listSheets(v.path, false);
+    const all = await api.listSheets("", true);
+    if (v.kind === "all") return all;
+    const since = Date.now() / 1000 - RECENT_SECS;
+    return all.filter((x) => x.modified >= since);
+  }
+
   const totalCount = (g: Group): number => g.count + g.children.reduce((n, c) => n + totalCount(c), 0);
   const viewGroupPath = (): string => (S.view.kind === "group" ? S.view.path : "");
 
@@ -349,23 +363,22 @@ async function main(): Promise<void> {
   function renderTree(): void {
     treeEl.replaceChildren();
     if (!S.tree) return;
-    const allActive = S.view.kind === "all";
-    treeEl.append(
+    const smartRow = (kind: "all" | "recent", ico: string, label: string): HTMLElement =>
       h(
         "div",
-        { class: "row" + (allActive ? " active" : ""), style: "padding-left:6px", onclick: () => void selectView({ kind: "all" }) },
+        { class: "row" + (S.view.kind === kind ? " active" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind }) },
         h("span", { class: "chev" }),
-        h("span", { class: "name" }, "All sheets"),
-        h("span", { class: "count" }, String(totalCount(S.tree))),
-      ),
-      h("div", { class: "tree-sep" }),
-    );
-    const addGroup = (g: Group, depth: number): void => {
+        icon(ico),
+        h("span", { class: "name" }, label),
+      );
+    treeEl.append(h("div", { class: "tree-label" }, "Library"), smartRow("all", "all", "All"), smartRow("recent", "clock", "Last 7 Days"));
+
+    const rowFor = (g: Group, depth: number, label: string, ico: string): HTMLElement => {
       const isRoot = g.path === "";
-      const open = isRoot || !S.collapsed.has(g.path);
+      const open = !S.collapsed.has(g.path);
       const active = S.view.kind === "group" && S.view.path === g.path;
       const chev = h("span", { class: "chev" + (open ? " open" : "") });
-      if (g.children.length) {
+      if (!isRoot && g.children.length) {
         chev.append(icon("chev"));
         chev.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -377,10 +390,10 @@ async function main(): Promise<void> {
       }
       const row = h(
         "div",
-        { class: "row" + (active ? " active" : ""), style: `padding-left:${6 + depth * 14}px`, onclick: () => void selectView({ kind: "group", path: g.path }) },
+        { class: "row" + (active ? " active" : ""), style: `padding-left:${8 + depth * 16}px`, onclick: () => void selectView({ kind: "group", path: g.path }) },
         chev,
-        h("span", { class: "name" }, g.name),
-        h("span", { class: "count" }, String(g.count)),
+        icon(ico),
+        h("span", { class: "name" }, label),
       );
       row.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -399,10 +412,16 @@ async function main(): Promise<void> {
         const src = e.dataTransfer?.getData("text/x-scriptorium");
         if (src) void moveTo(src, g.path);
       });
-      treeEl.append(row);
-      if (open) for (const c of g.children) addGroup(c, depth + 1);
+      return row;
     };
-    addGroup(S.tree, 0);
+
+    // Loose sheets in the library folder live in the Inbox, like Ulysses.
+    treeEl.append(h("div", { class: "tree-label" }, "On this computer"), rowFor(S.tree, 0, "Inbox", "inbox"));
+    const addGroup = (g: Group, depth: number): void => {
+      treeEl.append(rowFor(g, depth, g.name, "doc"));
+      if (!S.collapsed.has(g.path)) for (const c of g.children) addGroup(c, depth + 1);
+    };
+    for (const c of S.tree.children) addGroup(c, 0);
   }
 
   function groupMenu(g: Group): MenuItem[] {
@@ -437,13 +456,14 @@ async function main(): Promise<void> {
       }
       return;
     }
-    listTitle.textContent = S.view.kind === "all" ? "All sheets" : S.view.path === "" ? "Library" : S.view.path.split("/").pop() ?? "";
+    listTitle.textContent =
+      S.view.kind === "all" ? "All" : S.view.kind === "recent" ? "Last 7 Days" : S.view.path === "" ? "Inbox" : S.view.path.split("/").pop() ?? "";
     if (!S.sheets.length) {
-      sheetsEl.append(h("div", { class: "none" }, "No sheets here yet."));
+      sheetsEl.append(h("div", { class: "none" }, S.view.kind === "recent" ? "Nothing written in the last 7 days." : "No sheets here yet."));
       return;
     }
     for (const s of S.sheets) {
-      const meta = [whenText(s.modified), `${s.words.toLocaleString()} ${s.words === 1 ? "word" : "words"}`, S.view.kind === "all" ? groupOf(s.path) : ""]
+      const meta = [whenText(s.modified), `${s.words.toLocaleString()} ${s.words === 1 ? "word" : "words"}`, S.view.kind !== "group" ? groupOf(s.path) : ""]
         .filter(Boolean)
         .join(" · ");
       sheetsEl.append(sheetRow(s.path, s.title, s.preview, meta));
@@ -456,7 +476,7 @@ async function main(): Promise<void> {
 
   function groupOf(path: string): string {
     const i = path.lastIndexOf("/");
-    return i < 0 ? "Library" : path.slice(0, i);
+    return i < 0 ? "Inbox" : path.slice(0, i);
   }
 
   function sheetRow(path: string, title: string, preview: string, meta: string): HTMLElement {
