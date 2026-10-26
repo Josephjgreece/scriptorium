@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arrange, dropFromMeta, emptyMeta, glueOf, mergeMeta, parseMeta, remapMeta, tidy, type Meta } from "../src/meta";
+import { arrange, arrangeGroups, dropFromMeta, emptyMeta, glueOf, mergeMeta, parseMeta, remapMeta, tidy, type Meta } from "../src/meta";
 
 const meta = (m: Partial<Meta> = {}): Meta => ({ ...emptyMeta(), ...m });
 const sheets = (...paths: string[]) => paths.map((path) => ({ path }));
@@ -13,6 +13,12 @@ describe("parseMeta", () => {
     expect(parseMeta('{"order":{"a":[1,"x.md"]},"material":"x","glue":[["a.md"],["a.md","b.md"]],"filters":[{"id":1}]}')).toEqual(
       meta({ order: { a: ["x.md"] }, glue: [["a.md", "b.md"]] }),
     );
+  });
+
+  it("reads group order and group looks, ignoring junk", () => {
+    const m = parseMeta('{"groups":{"":["B","A",3]},"style":{"A":"book:blue","B":7}}');
+    expect(m.groups).toEqual({ "": ["B", "A"] });
+    expect(m.style).toEqual({ A: "book:blue" });
   });
 
   it("round-trips filters", () => {
@@ -152,5 +158,38 @@ describe("mergeMeta (two devices, one synced folder)", () => {
 
   it("is a no-op when nobody changed anything", () => {
     expect(mergeMeta(base, clone(base), clone(base))).toEqual(base);
+  });
+});
+
+describe("groups: order and looks", () => {
+  it("arranged subgroups keep their order and new ones follow", () => {
+    const m = meta({ groups: { "": ["Z", "A"] } });
+    expect(paths(arrangeGroups(m, "", sheets("A", "B", "Z", "C")))).toEqual(["Z", "A", "B", "C"]);
+    expect(paths(arrangeGroups(meta(), "", sheets("A", "B")))).toEqual(["A", "B"]);
+  });
+
+  it("follow renames, moves and deletes", () => {
+    const m = meta({ groups: { Book: ["Book/B", "Book/A"] }, style: { Book: "book:blue", "Book/A": "star:red" } });
+    remapMeta(m, (p) => (p === "Book" || p.startsWith("Book/") ? "Novel" + p.slice(4) : p));
+    expect(m.groups).toEqual({ Novel: ["Novel/B", "Novel/A"] });
+    expect(m.style).toEqual({ Novel: "book:blue", "Novel/A": "star:red" });
+    remapMeta(m, (p) => (p === "Novel/B" ? "Elsewhere/B" : p)); // moved to another parent
+    expect(m.groups).toEqual({ Novel: ["Novel/A"] });
+    dropFromMeta(m, (p) => p === "Novel" || p.startsWith("Novel/"));
+    expect(m.groups).toEqual({});
+    expect(m.style).toEqual({});
+  });
+
+  it("merges group order and looks from two devices", () => {
+    const base = meta({ groups: { "": ["A", "B"] }, style: { A: "book:blue" } });
+    const mine = JSON.parse(JSON.stringify(base)) as Meta;
+    mine.style.B = "star:red";
+    delete mine.style.A;
+    const theirs = JSON.parse(JSON.stringify(base)) as Meta;
+    theirs.groups[""] = ["B", "A"];
+    theirs.style.C = "bolt:green";
+    const out = mergeMeta(base, mine, theirs);
+    expect(out.groups[""]).toEqual(["B", "A"]);
+    expect(out.style).toEqual({ B: "star:red", C: "bolt:green" });
   });
 });

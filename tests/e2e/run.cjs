@@ -62,7 +62,8 @@ async function freshPage(browser, files, dirs = [], meta = null) {
     [seeded, dirs, meta],
   );
   await page.goto(URL);
-  await page.waitForSelector(".sheet-item");
+  await page.waitForSelector(".row");
+  await sleep(250); // let the first sheet open
   const disk = {
     files: () => page.evaluate(() => JSON.parse(localStorage.getItem("scriptorium-web-library")).files),
     meta: () => page.evaluate(() => JSON.parse(localStorage.getItem("scriptorium-web-meta") || "{}")),
@@ -277,6 +278,141 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       await waitFor(async () => (await titles(page)).length === 0, "trash emptied");
       assert.ok((await page.textContent(".sheets")).includes("The Trash is empty."));
       assert.ok("Keep.md" in (await disk.files()), "the library is untouched");
+      await page.close();
+    });
+
+    console.log("Toolbar and keyboard");
+    await test("the sidebar can be hidden from the toolbar or Ctrl+\\, and stays hidden after a reload", async () => {
+      const { page } = await freshPage(browser, { "A.md": ["# A", 5] });
+      const libWidth = () => page.$eval("#libPane", (e) => e.getBoundingClientRect().width);
+      assert.ok((await libWidth()) > 100);
+      await page.click("#btnSidebar");
+      await waitFor(() => page.$("body.no-lib"), "sidebar hidden");
+      assert.equal(await libWidth(), 0);
+      assert.ok(await page.isVisible("#btnSidebar2"), "a button to bring it back is in the toolbar");
+      await page.reload();
+      await page.waitForSelector(".sheet-item");
+      assert.ok(await page.$("body.no-lib"), "remembered");
+      await page.click("#btnSidebar2");
+      assert.ok((await libWidth()) > 100);
+      await page.keyboard.press("Control+Backslash");
+      assert.ok(await page.$("body.no-lib"));
+      await page.keyboard.press("Control+Backslash");
+      assert.equal(await page.$("body.no-lib"), null);
+      await page.close();
+    });
+
+    await test("arrow keys move through the list, Enter goes to the text, Escape comes back", async () => {
+      const files = { "One.md": ["# One\n\nfirst", 30], "Two.md": ["# Two\n\nsecond", 20], "Three.md": ["# Three\n\nthird", 10] };
+      const { page } = await freshPage(browser, files);
+      const text = () => page.$eval(".cm-content", (e) => e.innerText);
+      const inList = () => page.evaluate(() => document.activeElement && document.activeElement.id === "sheets");
+      await page.focus("#sheets");
+      assert.deepEqual(await titles(page), ["Three", "Two", "One"]);
+      await waitFor(async () => (await text()).includes("third"), "starts on the newest sheet");
+      await page.keyboard.press("ArrowDown");
+      await waitFor(async () => (await text()).includes("second"), "next sheet opens");
+      assert.ok(await inList(), "focus stays in the list");
+      await page.keyboard.press("ArrowDown");
+      await waitFor(async () => (await text()).includes("first"), "and the next");
+      await page.keyboard.press("ArrowDown");
+      assert.ok((await text()).includes("first"), "stops at the end");
+      await page.keyboard.press("ArrowUp");
+      await waitFor(async () => (await text()).includes("second"), "back up");
+      await page.keyboard.press("Enter");
+      await waitFor(async () => !(await inList()) && (await page.evaluate(() => !!document.activeElement.closest(".cm-editor"))), "Enter focuses the text");
+      await page.keyboard.press("Escape");
+      await waitFor(inList, "Escape returns to the list");
+      // Shift+arrows select a run, which can then be glued
+      await page.keyboard.press("Home");
+      await page.keyboard.press("Shift+ArrowDown");
+      assert.equal(await page.$$eval(".sheet-item.selected", (e) => e.length), 2);
+      await page.close();
+    });
+
+    await test("the sidebar is keyboard-navigable too", async () => {
+      const { page } = await freshPage(browser, { "Book/A.md": ["# A", 5], "Notes.md": ["# Notes", 10] }, ["Book"]);
+      await page.focus("#tree");
+      await page.click('.row:has-text("All")');
+      await page.focus("#tree");
+      await page.keyboard.press("ArrowDown");
+      await waitFor(async () => (await page.textContent(".list-title .lt-name")) === "Last 7 Days", "moves down a row");
+      await page.keyboard.press("ArrowDown");
+      await waitFor(async () => (await page.textContent(".list-title .lt-name")) === "Trash", "and another");
+      await page.keyboard.press("End");
+      await waitFor(async () => (await page.textContent(".list-title .lt-name")) === "Book", "End goes to the last row");
+      await page.keyboard.press("Enter");
+      assert.ok(await page.evaluate(() => document.activeElement.id === "sheets"), "Enter moves to the list");
+      await page.close();
+    });
+
+    await test("quick open finds a sheet in any group and opens it there", async () => {
+      const files = { "Book/Chapter Two.md": ["# Chapter Two\n\nburied words", 30], "Notes.md": ["# Notes\n\nother", 10] };
+      const { page } = await freshPage(browser, files, ["Book"]);
+      await page.keyboard.press("Control+o");
+      await page.waitForSelector(".qo input");
+      assert.equal((await page.$$(".qo-item")).length, 2, "recent sheets are offered first");
+      await page.keyboard.type("chap");
+      await waitFor(async () => (await page.$$(".qo-item")).length === 1, "filters as you type");
+      await page.keyboard.press("Enter");
+      await waitFor(async () => (await page.$eval(".cm-content", (e) => e.innerText)).includes("buried words"), "opened");
+      assert.equal(await page.textContent(".list-title .lt-name"), "Book", "and the list moved to its group");
+      assert.equal(await page.$(".modal-ov"), null);
+      await page.keyboard.press("Control+o");
+      await page.keyboard.type("zzzz");
+      assert.ok((await page.textContent(".qo-list")).includes("No sheet found"));
+      await page.keyboard.press("Escape");
+      assert.equal(await page.$(".modal-ov"), null);
+      await page.close();
+    });
+
+    console.log("Library parity");
+    await test("rename a file; a new sheet goes after the one you're on", async () => {
+      const files = { "A.md": ["# A\n\nx", 30], "B.md": ["# B\n\nx", 20], "C.md": ["# C\n\nx", 10] };
+      const { page, disk } = await freshPage(browser, files, [], { order: { "": ["A.md", "B.md", "C.md"] }, material: [], glue: [], filters: [] });
+      assert.deepEqual(await titles(page), ["A", "B", "C"]);
+      await row(page, "B").click();
+      await page.keyboard.press("Control+n");
+      await waitFor(async () => (await titles(page)).length === 4, "new sheet");
+      assert.deepEqual(await titles(page), ["A", "B", "Untitled", "C"]);
+
+      await row(page, "A").click({ button: "right" });
+      await page.click('.menu-item:has-text("Rename file")');
+      await page.fill(".modal input", "Opening");
+      await page.click(".modal .btn.primary");
+      await waitFor(async () => "Opening.md" in (await disk.files()) && !("A.md" in (await disk.files())), "renamed on disk");
+      await waitFor(async () => (await page.$$eval(".sheet-item", (e) => e.length)) === 4, "list refreshed");
+      assert.ok((await disk.meta()).order[""].includes("Opening.md"), "its place in the order followed");
+      await page.close();
+    });
+
+    await test("groups: drag to reorder, drag inside another, pick an icon and colour", async () => {
+      const { page, disk } = await freshPage(browser, { "Alpha/a.md": ["# a", 5], "Beta/b.md": ["# b", 6], "Gamma/c.md": ["# c", 7] }, ["Alpha", "Beta", "Gamma"]);
+      const names = () => page.$$eval('.row[data-nav="group"] .name', (els) => els.map((e) => e.textContent));
+      assert.deepEqual(await names(), ["Inbox", "Alpha", "Beta", "Gamma"]);
+      const grow = (n) => page.locator(`.row[data-nav="group"]:has-text("${n}")`);
+
+      await grow("Gamma").dragTo(grow("Alpha"), { targetPosition: { x: 60, y: 2 } });
+      await waitFor(async () => (await names()).join() === "Inbox,Gamma,Alpha,Beta", "Gamma dropped above Alpha");
+      assert.deepEqual((await disk.meta()).groups[""], ["Gamma", "Alpha", "Beta"]);
+
+      await grow("Beta").dragTo(grow("Alpha"), { targetPosition: { x: 60, y: 15 } });
+      await waitFor(async () => "Alpha/Beta/b.md" in (await disk.files()), "Beta moved inside Alpha");
+      await waitFor(async () => (await names()).join() === "Inbox,Gamma,Alpha,Beta", "shown nested");
+      assert.ok(await page.$('.row[data-gpath="Alpha"] .chev svg'), "Alpha now has a fold arrow");
+
+      await grow("Gamma").click({ button: "right" });
+      await page.click('.menu-item:has-text("Icon")');
+      await page.click('.pick[data-icon="star"]');
+      await page.click('.pick[data-color="red"]');
+      await page.click(".modal .btn.primary");
+      await waitFor(async () => (await disk.meta()).style?.Gamma === "star:red", "style saved");
+      const stroke = await page.$eval('.row[data-gpath="Gamma"] > svg', (e) => e.style.stroke);
+      assert.ok(stroke.includes("200") || stroke.includes("c8453b"), `icon coloured (${stroke})`);
+
+      await page.reload();
+      await page.waitForSelector(".row");
+      assert.deepEqual(await names(), ["Inbox", "Gamma", "Alpha", "Beta"], "order survives a reload");
       await page.close();
     });
 

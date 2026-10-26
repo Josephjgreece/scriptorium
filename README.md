@@ -7,8 +7,8 @@ Default location: `Documents/Scriptorium`. Change it from the sidebar, or fix it
 
 ## What's in this first version
 
-- Three panes with draggable dividers; light, dark or follow-the-system theme
-- Groups (nested), sheet list with title, preview, word count and date; "All sheets" view
+- A toolbar across the top and three panes with draggable dividers (the sidebar can be hidden); light, dark or follow-the-system theme
+- Groups (nested, drag to reorder, pick an icon and colour), sheet list with title, preview, word count and date; "All sheets" view
 - Markdown editor (CodeMirror 6): headings sized as prose, marks dimmed, centred column, spellcheck, find (Ctrl+F)
 - Typewriter mode (cursor stays centred), focus mode (hides the side panes)
 - Autosave; a new sheet is named after its first line
@@ -33,6 +33,11 @@ Default location: `Documents/Scriptorium`. Change it from the sidebar, or fix it
 | Shift+F | Focus mode |
 | Shift+D | Cycle theme |
 | Shift+E | Export current sheet |
+| O | Quick open: find a sheet in any group |
+| \ | Show or hide the sidebar |
+| F2 | Rename the current sheet's file |
+
+In the lists: arrows move (Left/Right fold groups in the sidebar), Shift+arrows select a run of sheets, Enter goes to the text, Esc comes back, Delete sends to the Trash.
 
 ## Run it
 

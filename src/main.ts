@@ -1,7 +1,7 @@
 import "./styles.css";
 import { loadApi, type Api, type Group, type SearchHit, type SheetInfo, type TrashItem } from "./api";
 import { createEditor, makeState } from "./editor";
-import { arrange, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
+import { arrange, arrangeGroups, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
 
 // ------------------------------------------------------------------ small helpers
 
@@ -52,6 +52,16 @@ const ICONS: Record<string, string> = {
   export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
+  sidebar: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M9.5 5v14"/>',
+  book: '<path d="M5 4.5h10a3 3 0 0 1 3 3V20H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h10"/>',
+  star: '<path d="M12 4l2.4 5 5.4.7-4 3.8 1 5.4L12 16.3 7.2 18.9l1-5.4-4-3.8 5.4-.7z"/>',
+  heart: '<path d="M12 19s-7-4.4-7-9.5A4 4 0 0 1 12 7a4 4 0 0 1 7 2.5C19 14.6 12 19 12 19z"/>',
+  flag: '<path d="M6 20V5M6 5h11l-2 3.5 2 3.5H6"/>',
+  bookmark: '<path d="M7 4h10v16l-5-3.5L7 20z"/>',
+  bolt: '<path d="M13 3L6 13.5h5L10 21l8-11h-5.5z"/>',
+  bulb: '<path d="M9 17h6M10 20h4M12 4a5.5 5.5 0 0 0-3 10v3h6v-3a5.5 5.5 0 0 0-3-10z"/>',
+  leaf: '<path d="M5 19c0-8 5-13 14-14 0 9-5 14-13 14"/><path d="M5 19c3-4 6-6 9-8"/>',
+  pen: '<path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/>',
   trash: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12M10.5 10.5v6M13.5 10.5v6"/>',
   warn: '<path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.2M12 16.8v.2"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
@@ -63,6 +73,10 @@ const ICONS: Record<string, string> = {
   doc: '<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10.5a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/>',
   inbox: '<path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>',
 };
+/** Icons and colours a group can be given in the sidebar. */
+const GROUP_ICONS = ["doc", "book", "star", "heart", "flag", "bookmark", "bolt", "bulb", "leaf", "pen"];
+const GROUP_COLORS: Record<string, string> = { blue: "#3b78d8", teal: "#2f93c0", green: "#3a9a5b", orange: "#d9822b", red: "#c8453b", purple: "#8a58c8" };
+
 function icon(name: string): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -216,10 +230,13 @@ async function main(): Promise<void> {
     /** keys (first path) of the selected list rows */
     sel: new Set<string>(),
     anchor: null as string | null,
+    /** the row the keyboard is on (the end of a Shift-extended selection) */
+    cursor: null as string | null,
     version: 0,
     savedVersion: 0,
     typewriter: ls("typewriter") === "1",
     theme: ls("theme") ?? "auto",
+    noLib: ls("noLib") === "1",
     collapsed: new Set<string>(safeJson(ls("collapsed"))),
   };
 
@@ -245,6 +262,8 @@ async function main(): Promise<void> {
   setDoc("");
 
   // -------- icons on static buttons
+  el("btnSidebar").append(icon("sidebar"));
+  el("btnSidebar2").append(icon("sidebar"));
   el("btnNewGroup").append(icon("folderPlus"));
   el("btnNewSheet").append(icon("plus"));
   el("btnTypewriter").append(icon("type"));
@@ -274,6 +293,15 @@ async function main(): Promise<void> {
     if (S.typewriter) view.dispatch({ effects: [], scrollIntoView: true });
     toast(`Typewriter mode ${S.typewriter ? "on" : "off"}`);
   }
+  function applySidebar(): void {
+    document.body.classList.toggle("no-lib", S.noLib);
+    el("btnSidebar").classList.toggle("on", false);
+  }
+  function toggleSidebar(): void {
+    S.noLib = !S.noLib;
+    lsSet("noLib", S.noLib ? "1" : "0");
+    applySidebar();
+  }
   function toggleFocus(): void {
     const on = document.body.classList.toggle("focus");
     el("btnFocus").classList.toggle("on", on);
@@ -281,6 +309,7 @@ async function main(): Promise<void> {
   }
   applyTheme();
   applyTypewriter();
+  applySidebar();
 
   const current = () => S.current;
 
@@ -541,7 +570,7 @@ async function main(): Promise<void> {
     const smartRow = (kind: "all" | "recent" | "conflicts" | "trash", ico: string, label: string, count = 0): HTMLElement =>
       h(
         "div",
-        { class: "row" + (S.view.kind === kind ? " active" : "") + (kind === "conflicts" ? " warn" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind }) },
+        { class: "row" + (S.view.kind === kind ? " active" : "") + (kind === "conflicts" ? " warn" : ""), style: "padding-left:8px", "data-nav": kind, onclick: () => void selectView({ kind }) },
         h("span", { class: "chev" }),
         icon(ico),
         h("span", { class: "name" }, label),
@@ -565,7 +594,7 @@ async function main(): Promise<void> {
     for (const f of S.meta.filters) {
       const row = h(
         "div",
-        { class: "row" + (S.view.kind === "filter" && S.view.id === f.id ? " active" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind: "filter", id: f.id }) },
+        { class: "row" + (S.view.kind === "filter" && S.view.id === f.id ? " active" : ""), style: "padding-left:8px", "data-nav": "filter", onclick: () => void selectView({ kind: "filter", id: f.id }) },
         h("span", { class: "chev" }),
         icon("funnel"),
         h("span", { class: "name" }, f.name),
@@ -580,7 +609,7 @@ async function main(): Promise<void> {
       treeEl.append(row);
     }
 
-    const rowFor = (g: Group, depth: number, label: string, ico: string): HTMLElement => {
+    const rowFor = (g: Group, depth: number, label: string, ico: string, color = ""): HTMLElement => {
       const isRoot = g.path === "";
       const open = !S.collapsed.has(g.path);
       const active = S.view.kind === "group" && S.view.path === g.path;
@@ -589,33 +618,70 @@ async function main(): Promise<void> {
         chev.append(icon("chev"));
         chev.addEventListener("click", (e) => {
           e.stopPropagation();
-          if (S.collapsed.has(g.path)) S.collapsed.delete(g.path);
-          else S.collapsed.add(g.path);
-          lsSet("collapsed", JSON.stringify([...S.collapsed]));
-          renderTree();
+          toggleCollapsed(g.path);
         });
       }
+      const ic = icon(ico);
+      if (color) ic.style.stroke = color;
       const row = h(
         "div",
-        { class: "row" + (active ? " active" : ""), style: `padding-left:${8 + depth * 16}px`, onclick: () => void selectView({ kind: "group", path: g.path }) },
+        {
+          class: "row" + (active ? " active" : ""),
+          style: `padding-left:${8 + depth * 16}px`,
+          "data-nav": "group",
+          "data-gpath": g.path,
+          "data-kids": g.children.length ? "1" : null,
+          draggable: isRoot ? null : "true",
+          onclick: () => void selectView({ kind: "group", path: g.path }),
+        },
         chev,
-        icon(ico),
+        ic,
         h("span", { class: "name" }, label),
       );
       row.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         showMenu(e.clientX, e.clientY, groupMenu(g));
       });
+      row.addEventListener("dragstart", (e) => {
+        dragGroup = g.path;
+        e.dataTransfer?.setData("text/x-scriptorium-group", g.path);
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      });
+      // dropping a group: near the top or bottom edge puts it before or after this one,
+      // in the middle moves it inside. Dropping sheets always moves them inside.
+      const zoneOf = (e: DragEvent): "before" | "after" | "into" => {
+        if (isRoot) return "into";
+        const r = row.getBoundingClientRect();
+        const f = (e.clientY - r.top) / r.height;
+        return f < 0.28 ? "before" : f > 0.72 ? "after" : "into";
+      };
+      const clearMarks = () => row.classList.remove("drop", "drop-above", "drop-below");
       row.addEventListener("dragover", (e) => {
-        if (e.dataTransfer?.types.includes("text/x-scriptorium")) {
+        const types = e.dataTransfer?.types ?? [];
+        if (types.includes("text/x-scriptorium-group")) {
+          if (!dragGroup || dragGroup === g.path || g.path.startsWith(dragGroup + "/")) return;
+          e.preventDefault();
+          const z = zoneOf(e);
+          clearMarks();
+          row.classList.add(z === "before" ? "drop-above" : z === "after" ? "drop-below" : "drop");
+        } else if (types.includes("text/x-scriptorium-paths") || types.includes("text/x-scriptorium")) {
           e.preventDefault();
           row.classList.add("drop");
         }
       });
-      row.addEventListener("dragleave", () => row.classList.remove("drop"));
+      row.addEventListener("dragleave", clearMarks);
+      row.addEventListener("dragend", () => {
+        dragGroup = null;
+        treeEl.querySelectorAll(".drop, .drop-above, .drop-below").forEach((n) => n.classList.remove("drop", "drop-above", "drop-below"));
+      });
       row.addEventListener("drop", (e) => {
         e.preventDefault();
-        row.classList.remove("drop");
+        clearMarks();
+        if (e.dataTransfer?.types.includes("text/x-scriptorium-group")) {
+          if (dragGroup) void moveGroup(dragGroup, g, zoneOf(e));
+          dragGroup = null;
+          return;
+        }
         const raw = e.dataTransfer?.getData("text/x-scriptorium-paths");
         const src = e.dataTransfer?.getData("text/x-scriptorium");
         const paths = raw ? (JSON.parse(raw) as string[]) : src ? [src] : [];
@@ -627,10 +693,79 @@ async function main(): Promise<void> {
     // Loose sheets in the library folder live in the Inbox, like Ulysses.
     treeEl.append(h("div", { class: "tree-label" }, "On this computer"), rowFor(S.tree, 0, "Inbox", "inbox"));
     const addGroup = (g: Group, depth: number): void => {
-      treeEl.append(rowFor(g, depth, g.name, "doc"));
-      if (!S.collapsed.has(g.path)) for (const c of g.children) addGroup(c, depth + 1);
+      const [ico, colour] = (S.meta.style[g.path] ?? "").split(":");
+      treeEl.append(rowFor(g, depth, g.name, GROUP_ICONS.includes(ico) ? ico : "doc", GROUP_COLORS[colour] ?? ""));
+      if (!S.collapsed.has(g.path)) for (const c of arrangeGroups(S.meta, g.path, g.children)) addGroup(c, depth + 1);
     };
-    for (const c of S.tree.children) addGroup(c, 0);
+    for (const c of arrangeGroups(S.meta, "", S.tree.children)) addGroup(c, 0);
+  }
+
+  let dragGroup: string | null = null;
+
+  function toggleCollapsed(path: string): void {
+    if (S.collapsed.has(path)) S.collapsed.delete(path);
+    else S.collapsed.add(path);
+    lsSet("collapsed", JSON.stringify([...S.collapsed]));
+    renderTree();
+  }
+
+  const findGroup = (g: Group | null, path: string): Group | null => (!g ? null : g.path === path ? g : g.children.reduce<Group | null>((f, c) => f ?? findGroup(c, path), null));
+
+  /** Move a group next to another (before / after) or inside it, keeping everything that refers to it in step. */
+  async function moveGroup(src: string, target: Group, zone: "before" | "after" | "into"): Promise<void> {
+    if (src === target.path || target.path.startsWith(src + "/")) return;
+    const dest = zone === "into" ? target.path : parentOf(target.path);
+    await flushSave();
+    try {
+      let np = src;
+      if (parentOf(src) !== dest) {
+        np = await api.moveItem(src, dest);
+        applyRemap((p) => (p === src || p.startsWith(src + "/") ? np + p.slice(src.length) : p));
+      }
+      if (zone === "into") S.collapsed.delete(target.path);
+      else {
+        const sibs = arrangeGroups(S.meta, dest, findGroup(S.tree, dest)?.children ?? []).map((c) => (c.path === src ? np : c.path)).filter((p) => p !== np);
+        const at = sibs.indexOf(target.path);
+        sibs.splice(zone === "before" ? at : at + 1, 0, np);
+        S.meta.groups[dest] = sibs;
+        persistMeta();
+      }
+      await refresh();
+    } catch (e) {
+      toast(msg(e));
+      await refresh();
+    }
+  }
+
+  async function askGroupStyle(g: Group): Promise<void> {
+    const [curIcon, curColor] = (S.meta.style[g.path] ?? "doc:").split(":");
+    let pickIcon = GROUP_ICONS.includes(curIcon) ? curIcon : "doc";
+    let pickColor = GROUP_COLORS[curColor] ? curColor : "";
+    const r = await modal((close) => {
+      const iconBtns = GROUP_ICONS.map((n) => h("button", { class: "pick", title: n, "data-icon": n }, icon(n)));
+      const colorBtns = ["", ...Object.keys(GROUP_COLORS)].map((c) => h("button", { class: "pick swatch", title: c || "no colour", "data-color": c, style: c ? `background:${GROUP_COLORS[c]}` : null }));
+      const paint = () => {
+        iconBtns.forEach((b) => b.classList.toggle("on", b.dataset.icon === pickIcon));
+        colorBtns.forEach((b) => b.classList.toggle("on", (b.dataset.color ?? "") === pickColor));
+        iconBtns.forEach((b) => ((b.firstElementChild as SVGElement).style.stroke = pickColor ? GROUP_COLORS[pickColor] : ""));
+      };
+      iconBtns.forEach((b) => b.addEventListener("click", () => ((pickIcon = b.dataset.icon!), paint())));
+      colorBtns.forEach((b) => b.addEventListener("click", () => ((pickColor = b.dataset.color ?? ""), paint())));
+      paint();
+      return h(
+        "div",
+        { class: "modal" },
+        h("h3", {}, `Icon for “${g.name}”`),
+        h("div", { class: "pick-grid" }, ...iconBtns),
+        h("div", { class: "pick-grid" }, ...colorBtns),
+        h("div", { class: "actions" }, h("button", { class: "btn", onclick: () => close(null) }, "Cancel"), h("button", { class: "btn primary", onclick: () => close(`${pickIcon}:${pickColor}`) }, "Done")),
+      );
+    });
+    if (r === null) return;
+    if (r === "doc:") delete S.meta.style[g.path];
+    else S.meta.style[g.path] = r;
+    persistMeta();
+    renderTree();
   }
 
   function groupMenu(g: Group): MenuItem[] {
@@ -642,6 +777,7 @@ async function main(): Promise<void> {
     if (g.path !== "") {
       items.push(
         { label: "Rename…", run: () => void renameGroup(g), sep: true },
+        { label: "Icon & colour…", run: () => void askGroupStyle(g) },
         { label: "Delete group", run: () => void deleteGroup(g), danger: true },
       );
     }
@@ -688,7 +824,16 @@ async function main(): Promise<void> {
   const plural = (n: number, one: string, many = one + "s"): string => `${n.toLocaleString()} ${n === 1 ? one : many}`;
   const inGroupView = (): boolean => S.view.kind === "group" && !S.hits;
 
+  let scrollToSelected = false;
   function renderSheets(): void {
+    drawSheets();
+    if (scrollToSelected && sheetsEl.querySelector(".selected")) {
+      scrollToSelected = false;
+      sheetsEl.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function drawSheets(): void {
     sheetsEl.replaceChildren();
     listTitle.replaceChildren();
     if (S.hits) {
@@ -794,7 +939,7 @@ async function main(): Promise<void> {
   function hitRow(hit: SearchHit): HTMLElement {
     const row = h(
       "div",
-      { class: "sheet-item" + (isOpen(hit.path) ? " selected" : ""), onclick: () => void openSheet(hit.path) },
+      { class: "sheet-item" + (isOpen(hit.path) ? " selected" : ""), "data-path": hit.path, onclick: () => void openSheet(hit.path) },
       h("div", { class: "si-head" }, h("div", { class: "si-title" }, hit.title || "Untitled")),
       h("div", { class: "si-prev" }, hit.snippet),
       h("div", { class: "si-meta" }, groupOf(hit.path)),
@@ -851,6 +996,7 @@ async function main(): Promise<void> {
     }
     if (canGlue(targets)) items.push({ label: `Glue ${paths.length} sheets`, run: () => void glueUnits(targets) });
     if (targets.length === 1 && u.paths.length > 1) items.push({ label: "Unglue sheets", run: () => void unglue(u) });
+    if (targets.length === 1 && u.paths.length === 1) items.push({ label: "Rename file…", run: () => void renameSheet(u.paths[0]) });
     items.push({ label: allMaterial ? "Remove material mark" : "Mark as material", run: () => void setMaterial(paths, !allMaterial) });
     if (targets.length === 1) items.push({ label: "Export…", run: () => void exportSheet(u.paths[0]) });
     items.push(
@@ -914,14 +1060,14 @@ async function main(): Promise<void> {
   }
 
   // -------- opening / closing sheets
-  async function openSheet(path: string): Promise<void> {
+  async function openSheet(path: string, focus = true): Promise<void> {
     const g = glueOf(S.meta, path);
     const key = g?.[0] ?? path;
     if (isOpen(path)) {
       S.sel = new Set([key]);
-      S.anchor = key;
+      S.anchor = S.cursor = key;
       renderSheets();
-      view.focus();
+      if (focus) view.focus();
       return;
     }
     await flushSave();
@@ -935,13 +1081,13 @@ async function main(): Promise<void> {
       setDoc(texts.join(GLUE_JOIN), !!g);
       S.version = S.savedVersion = 0;
       S.sel = new Set([key]);
-      S.anchor = key;
+      S.anchor = S.cursor = key;
       setHasNone(false);
       setSave("");
       refreshCrumb();
       applyMaterialClass();
       renderSheets();
-      view.focus();
+      if (focus) view.focus();
     } catch (e) {
       toast(`Couldn't open that sheet: ${msg(e)}`);
       await refresh();
@@ -966,9 +1112,11 @@ async function main(): Promise<void> {
       searchEl.value = "";
       S.hits = null;
       const p = await api.createSheet(group);
-      // a new sheet goes to the end of the group, after the others in their current order
+      // a new sheet goes after the sheet you are on (or the end of the group), keeping the rest as is
       const others = arrange(S.meta, group, await api.listSheets(group, false)).map((x) => x.path).filter((x) => x !== p);
-      S.meta.order[group] = [...others, p];
+      const here = S.current ? (S.glue ?? [S.current]).at(-1)! : null;
+      const at = here ? others.indexOf(here) : -1;
+      S.meta.order[group] = at >= 0 ? [...others.slice(0, at + 1), p, ...others.slice(at + 1)] : [...others, p];
       persistMeta();
       if (S.view.kind !== "group" || S.view.path !== group) S.view = { kind: "group", path: group };
       await refresh();
@@ -999,6 +1147,20 @@ async function main(): Promise<void> {
     try {
       const np = await api.renameItem(g.path, name);
       applyRemap((p) => (p === g.path || p.startsWith(g.path + "/") ? np + p.slice(g.path.length) : p));
+      await refresh();
+    } catch (e) {
+      toast(msg(e));
+    }
+  }
+
+  async function renameSheet(path: string): Promise<void> {
+    const stem = (path.split("/").pop() ?? "").replace(/\.md$/i, "");
+    const name = await askText("Rename file", stem, "Rename");
+    if (!name || name === stem) return;
+    await flushSave();
+    try {
+      const np = await api.renameItem(path, name);
+      applyRemap((p) => (p === path ? np : p));
       await refresh();
     } catch (e) {
       toast(msg(e));
@@ -1358,6 +1520,169 @@ async function main(): Promise<void> {
     });
   }
 
+  // -------- keyboard: sidebar, list, quick open
+  async function goToSheet(path: string): Promise<void> {
+    searchEl.value = "";
+    S.hits = null;
+    for (let d = parentOf(path); d; d = parentOf(d)) S.collapsed.delete(d);
+    if (S.view.kind !== "group" || S.view.path !== parentOf(path)) S.view = { kind: "group", path: parentOf(path) };
+    await refresh();
+    await openSheet(path);
+  }
+
+  /** Ctrl/Cmd+O: type part of a title or folder name, arrows to pick, Enter to open. */
+  async function quickOpen(): Promise<void> {
+    if (document.querySelector(".modal-ov")) return;
+    const pick = await modal((close) => {
+      const input = h("input", { type: "text", placeholder: "Open a sheet…", spellcheck: "false", "aria-label": "Open a sheet" });
+      const list = h("div", { class: "qo-list", role: "listbox" });
+      let shown: SheetInfo[] = [];
+      let at = 0;
+      const subsequence = (q: string, text: string): boolean => {
+        let i = 0;
+        for (const ch of text) if (ch === q[i] && ++i === q.length) return true;
+        return q.length === 0;
+      };
+      const search = (): SheetInfo[] => {
+        const words = input.value.toLowerCase().split(/\s+/).filter(Boolean);
+        if (!words.length) return [...S.all].sort((a, b) => b.modified - a.modified).slice(0, 8);
+        const score = (x: SheetInfo): number => {
+          const title = x.title.toLowerCase();
+          const hay = `${title} ${x.path.toLowerCase()}`;
+          if (!words.every((w) => hay.includes(w))) return words.length === 1 && subsequence(words[0], title) ? 1 : 0;
+          return 10 + (title.startsWith(words[0]) ? 5 : 0) + (title.includes(words[0]) ? 3 : 0);
+        };
+        return S.all
+          .map((x) => [x, score(x)] as const)
+          .filter(([, n]) => n > 0)
+          .sort((a, b) => b[1] - a[1] || b[0].modified - a[0].modified)
+          .slice(0, 8)
+          .map(([x]) => x);
+      };
+      const draw = () => {
+        shown = search();
+        at = Math.min(at, Math.max(0, shown.length - 1));
+        list.replaceChildren(
+          ...(shown.length
+            ? shown.map((x, i) =>
+                h(
+                  "div",
+                  { class: "qo-item" + (i === at ? " on" : ""), role: "option", onmousedown: (e: Event) => (e.preventDefault(), close(x.path)) },
+                  h("span", { class: "qo-title" }, x.title || "Untitled"),
+                  h("span", { class: "qo-where" }, groupOf(x.path)),
+                ),
+              )
+            : [h("div", { class: "none" }, "No sheet found. Ctrl/Cmd+K searches inside sheets.")]),
+        );
+      };
+      input.addEventListener("input", () => ((at = 0), draw()));
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+          e.preventDefault();
+          at = Math.max(0, Math.min(shown.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)));
+          draw();
+        } else if (e.key === "Enter" && shown[at]) {
+          e.preventDefault();
+          close(shown[at].path);
+        }
+      });
+      draw();
+      queueMicrotask(() => input.focus());
+      return h("div", { class: "modal qo" }, input, list);
+    });
+    if (pick) await goToSheet(pick);
+  }
+
+  // Sidebar: arrows move through the rows (opening each), Left/Right fold groups, Enter jumps to the list.
+  treeEl.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const rows = [...treeEl.querySelectorAll<HTMLElement>(".row")];
+    const i = rows.findIndex((r) => r.classList.contains("active"));
+    const go = (n: number): void => {
+      e.preventDefault();
+      const r = rows[Math.max(0, Math.min(rows.length - 1, n))];
+      r?.click();
+      requestAnimationFrame(() => treeEl.querySelector(".row.active")?.scrollIntoView({ block: "nearest" }));
+    };
+    const cur = rows[i];
+    const path = cur?.dataset.gpath;
+    if (e.key === "ArrowDown") go(i + 1);
+    else if (e.key === "ArrowUp") go(i - 1);
+    else if (e.key === "Home") go(0);
+    else if (e.key === "End") go(rows.length - 1);
+    else if (e.key === "ArrowRight" && path && cur.dataset.kids && S.collapsed.has(path)) {
+      e.preventDefault();
+      toggleCollapsed(path);
+    } else if (e.key === "ArrowLeft" && path) {
+      e.preventDefault();
+      if (cur.dataset.kids && !S.collapsed.has(path)) toggleCollapsed(path);
+      else if (path) void selectView({ kind: "group", path: parentOf(path) });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      sheetsEl.focus();
+    }
+  });
+
+  // List: arrows open the next or previous sheet, Shift+arrows select a run (to glue or move),
+  // Enter goes to the text, Delete moves the selection to the Trash.
+  sheetsEl.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const rows = [...sheetsEl.querySelectorAll<HTMLElement>(".sheet-item")];
+    if (!rows.length) return;
+    const keyOfRow = (r: HTMLElement): string => r.dataset.key ?? r.dataset.path ?? r.dataset.id ?? "";
+    const found = rows.findIndex((r) => keyOfRow(r) === S.cursor);
+    const i = found >= 0 ? found : Math.max(0, rows.findIndex((r) => r.classList.contains("selected")));
+    const move = (n: number): void => {
+      e.preventDefault();
+      const r = rows[Math.max(0, Math.min(rows.length - 1, n))];
+      scrollToSelected = true;
+      const key = r.dataset.key;
+      if (key !== undefined && e.shiftKey && S.anchor) {
+        const a = units.findIndex((x) => x.key === S.anchor);
+        const b = units.findIndex((x) => x.key === key);
+        if (a >= 0 && b >= 0) {
+          S.sel = new Set(units.slice(Math.min(a, b), Math.max(a, b) + 1).map((x) => x.key));
+          S.cursor = key;
+          renderSheets();
+          return;
+        }
+      }
+      S.cursor = keyOfRow(r);
+      if (key !== undefined) {
+        const u = units.find((x) => x.key === key);
+        if (u) void openSheet(u.paths[0], false);
+      } else if (r.dataset.path) void openSheet(r.dataset.path, false);
+      else if (r.dataset.id) {
+        const t = S.trash.find((x) => x.id === r.dataset.id);
+        if (t) void previewTrash(t);
+      }
+    };
+    if (e.key === "ArrowDown") move(i + 1);
+    else if (e.key === "ArrowUp") move(i - 1);
+    else if (e.key === "Home") move(0);
+    else if (e.key === "End") move(rows.length - 1);
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      if (S.current) view.focus();
+    } else if ((e.key === "Delete" || e.key === "Backspace") && units.length && inGroupViewOrList()) {
+      e.preventDefault();
+      const paths = units.filter((x) => S.sel.has(x.key)).flatMap((x) => x.paths);
+      if (paths.length) void deleteSheets(paths);
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      treeEl.focus();
+    }
+  });
+  const inGroupViewOrList = (): boolean => !S.hits && S.view.kind !== "trash";
+
+  // Escape leaves the text and returns to the list.
+  view.dom.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && (e.target as HTMLElement).classList.contains("cm-content") && !document.querySelector(".cm-panel")) {
+      e.preventDefault();
+      sheetsEl.focus();
+    }
+  });
+
   // -------- search
   let searchTimer = 0;
   searchEl.addEventListener("input", () => {
@@ -1392,12 +1717,19 @@ async function main(): Promise<void> {
   el("btnNewSheet").addEventListener("click", () => void newSheet());
   el("btnEmptyNew").addEventListener("click", () => void newSheet());
   el("btnNewGroup").addEventListener("click", () => void newGroup());
+  el("btnSidebar").addEventListener("click", toggleSidebar);
+  el("btnSidebar2").addEventListener("click", toggleSidebar);
   el("btnTypewriter").addEventListener("click", toggleTypewriter);
   el("btnTheme").addEventListener("click", cycleTheme);
   el("btnExport").addEventListener("click", () => void exportSheet());
   el("btnFocus").addEventListener("click", toggleFocus);
 
   window.addEventListener("keydown", (e) => {
+    if (e.key === "F2" && S.current && !S.glue && !document.querySelector(".modal-ov")) {
+      e.preventDefault();
+      void renameSheet(S.current);
+      return;
+    }
     const mod = e.ctrlKey || e.metaKey;
     if (!mod || e.altKey) return;
     const k = e.code;
@@ -1412,6 +1744,8 @@ async function main(): Promise<void> {
       searchEl.focus();
       searchEl.select();
     });
+    else if (k === "Backslash" && !e.shiftKey) run(toggleSidebar);
+    else if (k === "KeyO" && !e.shiftKey) run(() => void quickOpen());
     else if (k === "KeyT" && e.shiftKey) run(toggleTypewriter);
     else if (k === "KeyD" && e.shiftKey) run(cycleTheme);
     else if (k === "KeyF" && e.shiftKey) run(toggleFocus);

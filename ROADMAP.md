@@ -19,7 +19,7 @@ A writing app can't lose text, and a synced folder makes that harder.
 | Item | Status |
 |---|---|
 | Desktop app built in CI | Windows x64 + ARM64 installers (`windows-build.yml`); Linux and macOS compile, test and run the browser tests (`ci.yml`). macOS and Linux installers come with Phase 6 |
-| Tests | 19 unit tests for the structure model and merge (`npm test`), 20 Rust tests, 7 browser end-to-end scenarios (`npm run test:e2e`) |
+| Tests | 23 unit tests for the structure model and merge (`npm test`), 20 Rust tests, 13 browser end-to-end scenarios (`npm run test:e2e`) |
 | Atomic sheet writes | Done: temp file, then rename |
 | Save-failure recovery | Done: retries every 5 s, text stashed and recovered as a copy on next start, warning before closing with unsaved text |
 | File watcher | Done: reloads the open sheet and the lists when files change outside the app (polling a cheap fingerprint every 2.5 s and on window focus) |
@@ -29,13 +29,15 @@ A writing app can't lose text, and a synced folder makes that harder.
 
 Known gaps: the save-retry path is covered by reasoning and Rust tests, not an automated end-to-end test; conflicted-copy detection knows Dropbox and Syncthing names only (iCloud, OneDrive and Google Drive use other patterns); the file watcher polls rather than using OS notifications, which is plenty for a writing app but not instant.
 
-## Phase 1: Library parity
+## Phase 1: Library parity: done
 
-- ~~Trash view~~ **done**: a Trash row in the sidebar; deleted sheets and groups remember where they came from, preview read-only, restore to their original group (recreated if gone), delete permanently or empty, each with a confirmation. Material marks and manual position are not remembered across a delete
-- Top toolbar across the window: sidebar toggle, search and new sheet left; export, goal, navigator, style right (M)
-- Keyboard navigation in sidebar and list; Ctrl+O quick open; rename sheet (M)
-- Sidebar polish: collapsible, drag to reorder groups, group icons (M)
-- New sheet inserted after the selected sheet, not only at the end (S)
+- **Trash view**: a Trash row in the sidebar; deleted sheets and groups remember where they came from, preview read-only, restore to their original group (recreated if gone), delete permanently or empty, each with a confirmation. Material marks and manual position are not remembered across a delete
+- **Top toolbar**: one bar across the window; sidebar toggle (also Ctrl/Cmd+\), new group, search, new sheet, and the writing tools. The sidebar collapses completely and stays that way
+- **Keyboard navigation**: arrows in the sidebar (Left/Right fold groups) and in the sheet list (Shift+arrows select a run, Delete sends to the Trash); Enter moves to the text, Escape returns to the list; Ctrl/Cmd+O quick open across all groups; F2 renames a sheet's file. The selection is blue in the pane you are in and grey elsewhere
+- **Sidebar polish**: drag groups to reorder them, or onto the middle of another group to nest them; pick an icon and colour per group (ten icons, six colours). Order and looks live in `.scriptorium.json` and merge between devices
+- **New sheet** goes after the one you are on
+
+Not done from the original list: the toolbar's right-hand buttons are still the writing tools, not goal, navigator or style (those arrive with Phase 3).
 
 ## Phase 2: Projects
 

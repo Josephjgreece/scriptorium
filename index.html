@@ -7,40 +7,41 @@
   </head>
   <body>
     <div class="app" id="app">
+      <!-- toolbar row: one bar across the window, its sections lined up over the panes -->
+      <header class="tb tb-lib">
+        <button class="icon-btn" id="btnSidebar" title="Hide sidebar (Ctrl/Cmd+\)" aria-label="Toggle sidebar"></button>
+        <span class="tb-grow"></span>
+        <button class="icon-btn" id="btnNewGroup" title="New group (Ctrl/Cmd+Shift+N)" aria-label="New group"></button>
+      </header>
+      <div class="split" id="split1" role="separator" aria-orientation="vertical"></div>
+      <header class="tb tb-list">
+        <button class="icon-btn only-collapsed" id="btnSidebar2" title="Show sidebar (Ctrl/Cmd+\)" aria-label="Show sidebar"></button>
+        <input id="search" type="search" placeholder="Search library" aria-label="Search library" spellcheck="false" />
+        <button class="icon-btn" id="btnNewSheet" title="New sheet (Ctrl/Cmd+N)" aria-label="New sheet"></button>
+      </header>
+      <div class="split" id="split2" role="separator" aria-orientation="vertical"></div>
+      <header class="tb tb-ed">
+        <div class="ed-crumb" id="edCrumb"></div>
+        <div class="ed-tools">
+          <button class="icon-btn" id="btnTypewriter" title="Typewriter mode (Ctrl/Cmd+Shift+T)" aria-label="Typewriter mode"></button>
+          <button class="icon-btn" id="btnTheme" title="Theme (Ctrl/Cmd+Shift+D)" aria-label="Switch theme"></button>
+          <button class="icon-btn" id="btnExport" title="Export sheet (Ctrl/Cmd+Shift+E)" aria-label="Export sheet"></button>
+          <button class="icon-btn" id="btnFocus" title="Focus mode (Ctrl/Cmd+Shift+F)" aria-label="Focus mode"></button>
+        </div>
+      </header>
+
+      <!-- panes row -->
       <aside class="pane lib" id="libPane">
-        <header class="pane-head">
-          <span class="pane-title"></span>
-          <button class="icon-btn" id="btnNewGroup" title="New group (Ctrl/Cmd+Shift+N)" aria-label="New group"></button>
-        </header>
-        <nav class="tree" id="tree" aria-label="Groups"></nav>
+        <nav class="tree" id="tree" aria-label="Library" tabindex="0"></nav>
         <footer class="lib-foot">
           <button class="lib-btn" id="btnLibrary" aria-label="Library folder"></button>
         </footer>
       </aside>
-
-      <div class="split" id="split1" role="separator" aria-orientation="vertical"></div>
-
       <section class="pane list" id="listPane">
-        <header class="pane-head">
-          <input id="search" type="search" placeholder="Search library" aria-label="Search library" spellcheck="false" />
-          <button class="icon-btn" id="btnNewSheet" title="New sheet (Ctrl/Cmd+N)" aria-label="New sheet"></button>
-        </header>
         <div class="list-title" id="listTitle"></div>
-        <div class="sheets" id="sheets"></div>
+        <div class="sheets" id="sheets" tabindex="0" aria-label="Sheets"></div>
       </section>
-
-      <div class="split" id="split2" role="separator" aria-orientation="vertical"></div>
-
       <main class="editor-pane">
-        <header class="ed-head">
-          <div class="ed-crumb" id="edCrumb"></div>
-          <div class="ed-tools">
-            <button class="icon-btn" id="btnTypewriter" title="Typewriter mode (Ctrl/Cmd+Shift+T)" aria-label="Typewriter mode"></button>
-            <button class="icon-btn" id="btnTheme" title="Theme (Ctrl/Cmd+Shift+D)" aria-label="Switch theme"></button>
-            <button class="icon-btn" id="btnExport" title="Export sheet (Ctrl/Cmd+Shift+E)" aria-label="Export sheet"></button>
-            <button class="icon-btn" id="btnFocus" title="Focus mode (Ctrl/Cmd+Shift+F)" aria-label="Focus mode"></button>
-          </div>
-        </header>
         <div class="trash-bar" id="trashBar">
           <span id="trashBarText">This sheet is in the Trash.</span>
           <span class="grow"></span>

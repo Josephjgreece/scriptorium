@@ -90,7 +90,53 @@ button {
 .app {
   display: grid;
   grid-template-columns: var(--w-lib) 5px var(--w-list) 5px minmax(0, 1fr);
+  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-areas:
+    "tl s1 tm s2 te"
+    "pl s1 pm s2 pe";
   height: 100vh;
+}
+
+.tb-lib { grid-area: tl; background: var(--pane1); }
+.tb-list { grid-area: tm; background: var(--pane2); }
+.tb-ed { grid-area: te; background: var(--bg); }
+.pane.lib { grid-area: pl; }
+.pane.list { grid-area: pm; }
+.editor-pane { grid-area: pe; }
+#split1 { grid-area: s1; }
+#split2 { grid-area: s2; }
+
+/* the toolbar: one bar across the window */
+.tb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 10px 0 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tb-grow {
+  flex: 1;
+}
+
+.only-collapsed {
+  display: none;
+}
+
+/* sidebar hidden */
+body.no-lib .app {
+  grid-template-columns: 0 0 var(--w-list) 5px minmax(0, 1fr);
+}
+
+body.no-lib .tb-lib,
+body.no-lib .pane.lib,
+body.no-lib #split1 {
+  display: none;
+}
+
+body.no-lib .only-collapsed {
+  display: grid;
 }
 
 .pane {
@@ -118,24 +164,6 @@ button {
 .split:hover,
 .split.dragging {
   background: linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat;
-}
-
-.pane-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 52px;
-  padding: 0 10px 0 14px;
-  flex: none;
-}
-
-.pane-title {
-  flex: 1;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--muted);
-  font-size: 12px;
-  text-transform: uppercase;
 }
 
 .icon-btn {
@@ -343,6 +371,130 @@ button {
 
 .sheet-item.trash.selected .si-title {
   color: inherit;
+}
+
+.tree,
+.sheets {
+  outline: none;
+}
+
+/* the selection turns blue in the pane you're in, grey elsewhere */
+.tree:focus-within .row.active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.tree:focus-within .row.active > svg {
+  stroke: var(--on-accent) !important;
+}
+
+.tree:focus-within .row.active .count {
+  color: var(--on-accent);
+}
+
+.sheets:not(:focus-within) .sheet-item.selected {
+  background: var(--active);
+  color: inherit;
+  border-bottom-color: var(--line);
+}
+
+.sheets:not(:focus-within) .sheet-item.selected .si-prev,
+.sheets:not(:focus-within) .sheet-item.selected .si-meta,
+.sheets:not(:focus-within) .sheet-item.selected .si-badge {
+  color: var(--muted);
+}
+
+.row.drop-above {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.row.drop-below {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.pick-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.pick {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pick.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.pick svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.pick.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+.pick.swatch[data-color=""] {
+  background: linear-gradient(135deg, var(--bg) 46%, #c0392b 47% 53%, var(--bg) 54%);
+}
+
+.modal.qo {
+  padding: 12px;
+}
+
+.modal.qo input {
+  margin-bottom: 8px;
+}
+
+.qo-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  cursor: default;
+}
+
+.qo-item.on {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.qo-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qo-where {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.qo-item.on .qo-where {
+  color: var(--on-accent);
+  opacity: 0.85;
 }
 
 .tree-label {
@@ -578,12 +730,8 @@ button {
   background: var(--bg);
 }
 
-.ed-head {
-  display: flex;
-  align-items: center;
-  height: 52px;
-  padding: 0 10px 0 20px;
-  flex: none;
+.tb-ed {
+  padding-left: 20px;
 }
 
 .ed-crumb {
@@ -611,7 +759,7 @@ button {
 
 .empty {
   position: absolute;
-  inset: 52px 0 34px 0;
+  inset: 0 0 34px 0;
   display: none;
   flex-direction: column;
   align-items: center;
@@ -697,8 +845,14 @@ body.focus .app {
 }
 
 body.focus .pane,
+body.focus .tb-lib,
+body.focus .tb-list,
 body.focus .split {
   display: none;
+}
+
+body.focus .tb-ed {
+  border-bottom-color: transparent;
 }
 
 body.focus .ed-crumb,
@@ -707,7 +861,7 @@ body.focus .status {
   transition: opacity 0.2s;
 }
 
-body.focus .ed-head:hover .ed-crumb,
+body.focus .tb-ed:hover .ed-crumb,
 body.focus .status:hover {
   opacity: 1;
 }

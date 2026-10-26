@@ -15,13 +15,17 @@ export interface Filter {
 export interface Meta {
   /** group path -> sheet paths in the order the person arranged them */
   order: Record<string, string[]>;
+  /** parent group path -> its subgroups in the order the person arranged them */
+  groups: Record<string, string[]>;
+  /** group path -> "icon:colour", the look chosen for it in the sidebar */
+  style: Record<string, string>;
   material: string[];
   /** each entry is a run of two or more sheets, in reading order, from the same group */
   glue: string[][];
   filters: Filter[];
 }
 
-export const emptyMeta = (): Meta => ({ order: {}, material: [], glue: [], filters: [] });
+export const emptyMeta = (): Meta => ({ order: {}, groups: {}, style: {}, material: [], glue: [], filters: [] });
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
@@ -34,8 +38,12 @@ export function parseMeta(text: string): Meta {
     return m;
   }
   if (!raw || typeof raw !== "object") return m;
-  const order = raw.order as Record<string, unknown> | undefined;
-  if (order && typeof order === "object") for (const [k, v] of Object.entries(order)) m.order[k] = strings(v);
+  for (const field of ["order", "groups"] as const) {
+    const table = raw[field] as Record<string, unknown> | undefined;
+    if (table && typeof table === "object") for (const [k, v] of Object.entries(table)) m[field][k] = strings(v);
+  }
+  const style = raw.style as Record<string, unknown> | undefined;
+  if (style && typeof style === "object") for (const [k, v] of Object.entries(style)) if (typeof v === "string") m.style[k] = v;
   m.material = strings(raw.material);
   if (Array.isArray(raw.glue)) m.glue = raw.glue.map(strings).filter((g) => g.length > 1);
   if (Array.isArray(raw.filters)) {
@@ -55,9 +63,12 @@ export const parentOf = (p: string): string => {
 
 /** Apply a path rewrite (rename, move) everywhere paths are stored. */
 export function remapMeta(m: Meta, fn: (p: string) => string): void {
-  const order: Record<string, string[]> = {};
-  for (const [k, v] of Object.entries(m.order)) order[fn(k)] = v.map(fn);
-  m.order = order;
+  for (const field of ["order", "groups"] as const) {
+    const moved: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(m[field])) moved[fn(k)] = v.map(fn);
+    m[field] = moved;
+  }
+  m.style = Object.fromEntries(Object.entries(m.style).map(([k, v]) => [fn(k), v]));
   m.material = m.material.map(fn);
   m.glue = m.glue.map((g) => g.map(fn));
   m.filters = m.filters.map((f) => ({ ...f, group: f.group ? fn(f.group) : "" }));
@@ -66,10 +77,13 @@ export function remapMeta(m: Meta, fn: (p: string) => string): void {
 
 /** Forget everything about paths that no longer exist. */
 export function dropFromMeta(m: Meta, gone: (p: string) => boolean): void {
-  for (const k of Object.keys(m.order)) {
-    if (gone(k)) delete m.order[k];
-    else m.order[k] = m.order[k].filter((p) => !gone(p));
+  for (const field of ["order", "groups"] as const) {
+    for (const k of Object.keys(m[field])) {
+      if (gone(k)) delete m[field][k];
+      else m[field][k] = m[field][k].filter((p) => !gone(p));
+    }
   }
+  for (const k of Object.keys(m.style)) if (gone(k)) delete m.style[k];
   m.material = m.material.filter((p) => !gone(p));
   m.glue = m.glue.map((g) => g.filter((p) => !gone(p)));
   m.filters = m.filters.map((f) => (f.group && gone(f.group) ? { ...f, group: "" } : f));
@@ -78,10 +92,12 @@ export function dropFromMeta(m: Meta, gone: (p: string) => boolean): void {
 
 /** Restore the invariants after paths moved: orders and glue only hold siblings, glue has 2+. */
 export function tidy(m: Meta): void {
-  for (const [k, v] of Object.entries(m.order)) {
-    const kept = [...new Set(v.filter((p) => parentOf(p) === k))];
-    if (kept.length) m.order[k] = kept;
-    else delete m.order[k];
+  for (const field of ["order", "groups"] as const) {
+    for (const [k, v] of Object.entries(m[field])) {
+      const kept = [...new Set(v.filter((p) => parentOf(p) === k))];
+      if (kept.length) m[field][k] = kept;
+      else delete m[field][k];
+    }
   }
   m.material = [...new Set(m.material)];
   const seen = new Set<string>();
@@ -116,6 +132,13 @@ export function arrange<T extends { path: string }>(m: Meta, group: string, shee
   return out;
 }
 
+/** Subgroups in the order you arranged them; new ones follow, as given (alphabetical). */
+export function arrangeGroups<T extends { path: string }>(m: Meta, parent: string, groups: T[]): T[] {
+  const rank = new Map((m.groups[parent] ?? []).map((p, i) => [p, i]));
+  const placed = groups.filter((g) => rank.has(g.path)).sort((a, b) => rank.get(a.path)! - rank.get(b.path)!);
+  return [...placed, ...groups.filter((g) => !rank.has(g.path))];
+}
+
 /** Marks that a glued sheet's text is a single document: this exact string joins its sheets. */
 export const GLUE_MARK = "<!-- scriptorium:next-sheet -->";
 export const GLUE_JOIN = `\n\n${GLUE_MARK}\n\n`;
@@ -143,11 +166,18 @@ function mergeSet<T>(base: T[], mine: T[], theirs: T[]): T[] {
  */
 export function mergeMeta(base: Meta, mine: Meta, theirs: Meta): Meta {
   const out = emptyMeta();
-  for (const k of new Set([...Object.keys(base.order), ...Object.keys(mine.order), ...Object.keys(theirs.order)])) {
-    const b = base.order[k] ?? [];
-    const m = mine.order[k] ?? [];
-    const t = theirs.order[k] ?? [];
-    out.order[k] = same(m, b) ? t : same(t, b) ? m : mergeSet(b, m, t);
+  for (const field of ["order", "groups"] as const) {
+    for (const k of new Set([...Object.keys(base[field]), ...Object.keys(mine[field]), ...Object.keys(theirs[field])])) {
+      const b = base[field][k] ?? [];
+      const m = mine[field][k] ?? [];
+      const t = theirs[field][k] ?? [];
+      out[field][k] = same(m, b) ? t : same(t, b) ? m : mergeSet(b, m, t);
+    }
+  }
+  for (const k of new Set([...Object.keys(base.style), ...Object.keys(mine.style), ...Object.keys(theirs.style)])) {
+    const [b, m, t] = [base.style[k], mine.style[k], theirs.style[k]];
+    const pick = b !== undefined && m === undefined ? undefined : m !== b ? m : t; // my change or removal wins, else theirs
+    if (pick !== undefined) out.style[k] = pick;
   }
   out.material = mergeSet(base.material, mine.material, theirs.material);
   out.glue = mergeSet(base.glue, mine.glue, theirs.glue);
