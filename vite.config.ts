@@ -8,5 +8,6 @@ export default defineConfig({
     strictPort: true,
     watch: { ignored: ["**/src-tauri/**"] },
   },
-  build: { target: "es2022" },
+  // The app loads its code from disk, not over a network, so one larger file is fine.
+  build: { target: "es2022", chunkSizeWarningLimit: 1500 },
 });
