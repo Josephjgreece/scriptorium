@@ -19,7 +19,7 @@ A writing app can't lose text, and a synced folder makes that harder.
 | Item | Status |
 |---|---|
 | Desktop app built in CI | Windows x64 + ARM64 installers (`windows-build.yml`); Linux and macOS compile, test and run the browser tests (`ci.yml`). macOS and Linux installers come with Phase 6 |
-| Tests | 46 unit tests for the structure model, merge and projects (`npm test`), 20 Rust tests, 18 browser end-to-end scenarios (`npm run test:e2e`) |
+| Tests | 70 unit tests (structure model, merge, projects, text, typing, appearance) (`npm test`), 23 Rust tests, 26 browser end-to-end scenarios (`npm run test:e2e`) |
 | Atomic sheet writes | Done: temp file, then rename |
 | Save-failure recovery | Done: retries every 5 s, text stashed and recovered as a copy on next start, warning before closing with unsaved text |
 | File watcher | Done: reloads the open sheet and the lists when files change outside the app (polling a cheap fingerprint every 2.5 s and on window focus) |
@@ -52,13 +52,19 @@ Ulysses calls this layer **Projects** (introduced in Ulysses 29, extended since,
 - Quick open and the keyboard take you into the right project
 - **Not done**: per-sheet status labels such as "Draft" (I could not confirm Ulysses does this, so I left it out); character goals (word goals only); project keywords and export defaults, which belong with Phase 4 (keywords) and Phase 5 (export)
 
-## Phase 3: Writing depth
+## Phase 3: Writing depth: done, with two items left out
 
-- Goals: word or character target per sheet, group or project, with a progress ring (M)
-- Navigator: heading outline that jumps to a position, and between glued sheets (M)
-- Editor: smart quotes and dashes, better list and quote continuation, images by drag and drop, footnotes, inline comments that stay out of exports, find and replace panel (L)
-- Statistics panel: reading time, sentences, paragraphs, per selection (S)
-- Appearance: font, size, line spacing, column width, a few themes beyond light and dark (M)
+- **Navigator** (toolbar, Ctrl/Cmd+Shift+O): the headings of the open text, the one you are under marked, click to jump; a glued text also shows where each sheet begins
+- **Statistics**: click the word count in the status bar for words, characters, sentences, paragraphs and reading time, with a second column for the selection. The status bar shows "3 of 46 words" while you select. Counting is now the same everywhere (status bar, sheet list, project goal): Markdown marks on their own ("#", "-", ">") are not words, and comments are not counted
+- **Typing**: curly quotes, en and em dashes and ellipses as you type; never inside code, HTML tags or link addresses, and a line of hyphens stays a rule. Can be switched off. Lists and quotes continue on Enter (numbered lists count up) and end on an empty item
+- **Comments** (Ctrl/Cmd+Shift+M): `<!-- note -->` annotations, shown muted and highlighted; wraps the selection if there is one. They stay out of word counts, titles, previews and every export
+- **Footnotes** (Ctrl/Cmd+Shift+Y): inserts `[^1]` at the cursor and the matching definition at the end, numbering itself; references and definitions are styled
+- **Find and replace** (Ctrl/Cmd+F, or Ctrl/Cmd+H): the same bar, restyled, with replace, replace all, match case, regexp and whole word
+- **Appearance** (toolbar "Aa", Ctrl/Cmd+,): five themes (Auto, Light, Dark, Sepia, Midnight), font (sans, serif, mono), text size, line spacing and column width, saved on this device. The toolbar theme button cycles through all five
+
+**Left out**
+- **Word goals per sheet or group**: dropped on request. The project word goal from Phase 2 stays
+- **Images by drag and drop**: needs the desktop app to serve image files from the library folder (Tauri's asset protocol and its permissions), which cannot be tried until the Windows build has been run. It belongs after real desktop testing
 
 ## Phase 4: Organisation power
 

@@ -23,6 +23,8 @@
       <header class="tb tb-ed">
         <div class="ed-crumb" id="edCrumb"></div>
         <div class="ed-tools">
+          <button class="icon-btn" id="btnNavigator" title="Navigator: headings (Ctrl/Cmd+Shift+O)" aria-label="Navigator"></button>
+          <button class="icon-btn" id="btnAppearance" title="Appearance and writing options (Ctrl/Cmd+,)" aria-label="Appearance"></button>
           <button class="icon-btn" id="btnTypewriter" title="Typewriter mode (Ctrl/Cmd+Shift+T)" aria-label="Typewriter mode"></button>
           <button class="icon-btn" id="btnTheme" title="Theme (Ctrl/Cmd+Shift+D)" aria-label="Switch theme"></button>
           <button class="icon-btn" id="btnExport" title="Export sheet (Ctrl/Cmd+Shift+E)" aria-label="Export sheet"></button>
@@ -54,7 +56,7 @@
           <button class="btn" id="btnEmptyNew">New sheet</button>
         </div>
         <footer class="status" id="status">
-          <span id="stWords">0 words</span>
+          <span id="stWords" class="stat-link" title="Statistics" role="button" tabindex="0">0 words</span>
           <span id="stChars">0 characters</span>
           <span id="stRead">0 min read</span>
           <span class="grow"></span>

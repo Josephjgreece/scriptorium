@@ -143,6 +143,34 @@ fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf {
 
 // ---------- text helpers ----------
 
+/// `<!-- ... -->` comments are annotations: they stay out of counts and exports. An unterminated
+/// one is left alone, so a half-typed comment never swallows the rest of the sheet.
+pub fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        match rest[start + 4..].find("-->") {
+            Some(end) => {
+                out.push_str(&rest[..start]);
+                out.push(' ');
+                rest = &rest[start + 4 + end + 3..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A word is a run of non-space characters with at least one letter or digit, so Markdown
+/// marks on their own ("#", "-", ">", "---") are not words. Comments don't count.
+pub fn count_words(text: &str) -> usize {
+    strip_comments(text)
+        .split_whitespace()
+        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
+        .count()
+}
+
 fn clean_title_line(line: &str) -> String {
     line.trim()
         .trim_start_matches('#')
@@ -154,7 +182,8 @@ fn clean_title_line(line: &str) -> String {
 }
 
 fn first_line_title(text: &str) -> String {
-    text.lines()
+    strip_comments(text)
+        .lines()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
         .map(clean_title_line)
@@ -162,7 +191,9 @@ fn first_line_title(text: &str) -> String {
 }
 
 fn title_and_preview(text: &str, fallback: &str) -> (String, String) {
-    let mut lines = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty());
+    // comments are for you: they never show up as a title or a preview
+    let clean = strip_comments(text);
+    let mut lines = clean.lines().map(|l| l.trim()).filter(|l| !l.is_empty());
     let title = lines
         .next()
         .map(clean_title_line)
@@ -261,7 +292,7 @@ pub fn sheets(root: &Path, group: &str, recursive: bool) -> Res<Vec<SheetInfo>> 
                 title,
                 preview,
                 modified: modified_secs(p),
-                words: text.split_whitespace().count(),
+                words: count_words(&text),
                 conflict: conflict_original_stem(&stem_of(p)).is_some(),
                 original: original_path(p).map(|o| rel_of(root, &o)),
             }
@@ -423,7 +454,7 @@ pub fn list_trash(root: &Path) -> Vec<TrashItem> {
         if p.is_dir() {
             let mut files = Vec::new();
             collect_md(&p, true, &mut files);
-            let words = files.iter().map(|f| fs::read_to_string(f).unwrap_or_default().split_whitespace().count()).sum();
+            let words = files.iter().map(|f| count_words(&fs::read_to_string(f).unwrap_or_default())).sum();
             out.push(TrashItem {
                 id,
                 title: name.clone(),
@@ -447,7 +478,7 @@ pub fn list_trash(root: &Path) -> Vec<TrashItem> {
                 original,
                 deleted,
                 sheets: 1,
-                words: text.split_whitespace().count(),
+                words: count_words(&text),
             });
         }
     }
@@ -803,7 +834,7 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].title, "Intro");
         assert_eq!(all[0].preview, "Some words here");
-        assert_eq!(all[0].words, 5);
+        assert_eq!(all[0].words, 4);
         assert!(sheets(&r, "", false).unwrap().is_empty());
     }
 
@@ -950,7 +981,7 @@ mod tests {
         let items = list_trash(&root);
         assert_eq!(items.len(), 2);
         let ch = items.iter().find(|i| i.title == "Chapter").unwrap();
-        assert_eq!((ch.original.as_str(), ch.is_group, ch.words), ("Book/Chapter.md", false, 5));
+        assert_eq!((ch.original.as_str(), ch.is_group, ch.words), ("Book/Chapter.md", false, 4));
         assert_eq!(read_trash_sheet(&root, &ch.id).unwrap(), "# Chapter\n\nSome words here");
         assert!(sheets(&root, "", true).unwrap().is_empty(), "trashed sheets are out of the library");
 
@@ -984,7 +1015,7 @@ mod tests {
         delete_item(&root, "A").unwrap();
         let items = list_trash(&root);
         let b = items.iter().find(|i| i.name == "B").unwrap();
-        assert_eq!((b.is_group, b.sheets, b.words), (true, 2, 6));
+        assert_eq!((b.is_group, b.sheets, b.words), (true, 2, 4));
         assert_eq!(b.preview, "2 sheets");
         // "A" is in the trash too, so restoring B has to recreate A
         assert_eq!(restore_trash(&root, &b.id).unwrap(), "A/B");
@@ -1026,6 +1057,37 @@ mod tests {
         let item = list_trash(&root).remove(0);
         assert_eq!((item.original.as_str(), item.deleted), ("", 1_760_000_000));
         assert_eq!(restore_trash(&root, &item.id).unwrap(), "Old.md");
+    }
+
+    #[test]
+    fn a_comment_on_the_first_line_does_not_name_the_file() {
+        let root = tmp("commentname");
+        let p = create_sheet(&root, "").unwrap();
+        let p = write_sheet(&root, &p, "<!-- todo: fix opening -->\n# The Real Name\n\ntext").unwrap();
+        assert_eq!(p, "The Real Name.md");
+        let q = create_sheet(&root, "").unwrap();
+        assert_eq!(write_sheet(&root, &q, "<!-- only a note -->").unwrap(), q, "stays Untitled until there is real text");
+    }
+
+    #[test]
+    fn titles_and_previews_skip_comments() {
+        let (t, p) = title_and_preview("<!-- draft note -->\n# Real title\n\nFirst <!-- aside --> line", "x");
+        assert_eq!((t.as_str(), p.as_str()), ("Real title", "First   line"));
+        let (t2, _) = title_and_preview("<!-- only a comment -->", "fallback");
+        assert_eq!(t2, "fallback");
+    }
+
+    #[test]
+    fn words_ignore_markdown_marks_and_comments() {
+        assert_eq!(count_words("# Title\n\n- item one\n---\n> quoted words\n\n* * *"), 5);
+        assert_eq!(count_words("a <!-- hidden words here --> b"), 2);
+        assert_eq!(count_words("a <!-- multi\nline\ncomment --> b <!-- another --> c"), 3);
+        assert_eq!(count_words("half <!-- typed comment with no end and more words"), 9, "an unterminated comment is just text, so it never swallows the sheet");
+        assert_eq!(count_words("It's 2026 — “quoted”, fine."), 4);
+        assert_eq!(count_words(""), 0);
+        let root = tmp("wordcount");
+        fs::write(root.join("a.md"), "# One\n\n- two <!-- three -->").unwrap();
+        assert_eq!(sheets(&root, "", false).unwrap()[0].words, 2);
     }
 
     #[test]

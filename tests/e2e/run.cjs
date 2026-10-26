@@ -85,6 +85,8 @@ async function freshPage(browser, files, dirs = [], meta = null) {
 
 const titles = (page) => page.$$eval(".sheet-item .si-title", (els) => els.map((e) => e.textContent));
 const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first();
+// a row whose title is exactly `title` (a plain text match would also hit "Inbox" for "X")
+const titled = (page, title) => page.locator(".sheet-item", { has: page.locator(".si-title", { hasText: new RegExp(`^${title}$`) }) }).first();
 
 (async () => {
   const vite = await startVite();
@@ -259,16 +261,16 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       // permanent delete: cancel keeps it, confirm removes it
       for (const f of ["X", "Y"]) {
         await page.click('.row:has-text("Inbox")');
-        await row(page, f).click({ button: "right" });
+        await titled(page, f).click({ button: "right" });
         await page.click('.menu-item:has-text("Delete sheet")');
       }
       await page.click('.row:has-text("Trash")');
       await waitFor(async () => (await titles(page)).length === 2, "two in trash");
-      await row(page, "X").click({ button: "right" });
+      await titled(page, "X").click({ button: "right" });
       await page.click('.menu-item:has-text("Delete permanently")');
       await page.click(".modal .btn:not(.primary)");
       assert.equal((await titles(page)).length, 2, "cancel keeps it");
-      await row(page, "X").click({ button: "right" });
+      await titled(page, "X").click({ button: "right" });
       await page.click('.menu-item:has-text("Delete permanently")');
       await page.click(".modal .btn.primary");
       await waitFor(async () => (await titles(page)).join() === "Y", "X gone for good");
@@ -462,17 +464,17 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       const { page, disk } = await freshPage(browser, bookFiles, bookDirs, bookMeta({ deadline: "2099-01-01" }));
       await page.click('.row[data-nav="project-link"]');
       await waitFor(() => page.$(".proj-sub"), "project view");
-      assert.equal(await page.textContent(".proj-sub"), "10 of 100 words · 10%", "front matter and material are not counted");
-      assert.ok((await page.textContent(".list-title")).includes("3 sheets · 10 words"));
+      assert.equal(await page.textContent(".proj-sub"), "9 of 100 words · 9%", "front matter and material are not counted");
+      assert.ok((await page.textContent(".list-title")).includes("3 sheets · 9 words"));
       assert.ok((await page.textContent(".goal-text")).includes("days left"), "deadline pacing shown");
-      assert.equal(await page.$eval(".goal-fill", (e) => e.style.width), "10%");
+      assert.equal(await page.$eval(".goal-fill", (e) => e.style.width), "9%");
       assert.equal(await page.$$eval(".sheet-item.material", (e) => e.length), 1, "the Notes sheet is material");
 
       // a section changed to manuscript counts from then on
       await page.locator('.row[data-gpath="Book/Notes"]').click({ button: "right" });
       assert.ok((await page.$$eval(".menu-item", (e) => e.map((x) => x.textContent.trim()))).includes("✓ Material"));
       await page.click('.menu-item:has-text("Manuscript")');
-      await waitFor(async () => (await page.textContent(".proj-sub")) === "30 of 100 words · 30%", "Notes now counted");
+      await waitFor(async () => (await page.textContent(".proj-sub")) === "28 of 100 words · 28%", "Notes now counted");
       assert.equal(await page.$$eval(".sheet-item.material", (e) => e.length), 0);
       assert.equal((await disk.meta()).projects.Book.sections["Book/Notes"], undefined);
 
@@ -484,7 +486,7 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       await page.fill('input[aria-label="Project name"]', "Novel");
       await page.click(".modal .btn.primary");
       await waitFor(async () => "Novel/Chapters/One.md" in (await disk.files()), "project folder renamed");
-      await waitFor(async () => (await page.textContent(".proj-sub")) === "10 of 60 words · 16%", "new goal and recount");
+      await waitFor(async () => (await page.textContent(".proj-sub")) === "9 of 60 words · 15%", "new goal and recount");
       const m = (await disk.meta()).projects;
       assert.deepEqual(Object.keys(m), ["Novel"]);
       assert.equal(m.Novel.goal, 60);
@@ -557,6 +559,200 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       await waitFor(() => page.$('.row[data-nav="project-link"]') === null || page.$(".tree-hint"), "left the deleted project");
       await waitFor(async () => !("Book/Chapters/One.md" in (await disk.files())), "moved to the trash");
       assert.deepEqual((await disk.meta()).projects ?? {}, {});
+      await page.close();
+    });
+
+    console.log("Writing");
+    const docText = (page) => page.$eval(".cm-content", (e) => e.innerText.replace(/\u00a0/g, " "));
+    const writeIn = async (files, extra = {}) => {
+      const fixture = await freshPage(browser, files, [], extra.meta ?? null);
+      await fixture.page.click(".cm-content");
+      return fixture;
+    };
+
+    await test("typing: curly quotes, dashes and ellipses; code, rules and the off switch left alone", async () => {
+      const { page } = await writeIn({ "Draft.md": ["", 5] });
+      await page.keyboard.type("He said \"Hello\" and don't go -- yes... 1939--45 --- ok.");
+      assert.equal(await docText(page), "He said “Hello” and don’t go – yes… 1939–45 — ok.");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("---");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("```");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type('say("x") -- ...');
+      assert.ok((await docText(page)).includes('say("x") -- ...'), "fenced code stays as typed");
+      assert.ok((await docText(page)).split("\n").includes("---"), "a rule stays a rule");
+
+      await page.keyboard.press("Control+a");
+      await page.keyboard.press("Delete");
+      await page.keyboard.press("Control+,");
+      await page.uncheck("#optTypography");
+      await page.keyboard.press("Escape");
+      await page.click(".cm-content");
+      await page.keyboard.type('"plain" -- ...');
+      assert.equal(await docText(page), '"plain" -- ...', "switched off");
+      await page.close();
+    });
+
+    await test("lists and quotes continue on Enter and end on an empty item", async () => {
+      const { page } = await writeIn({ "Draft.md": ["", 5] });
+      await page.keyboard.type("- one");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("two");
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("1. a");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("b");
+      await page.keyboard.press("Enter");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("> q");
+      await page.keyboard.press("Enter");
+      await page.keyboard.type("r");
+      assert.equal(await docText(page), "- one\n- two\n1. a\n2. b\n> q\n> r", "Enter continues; Enter on an empty item removes the marker");
+      await page.close();
+    });
+
+    await test("comments are muted, never counted and never exported; footnotes number themselves", async () => {
+      const { page, disk } = await writeIn({ "Draft.md": ["", 5] });
+      await page.keyboard.type("Real words here.");
+      await page.keyboard.press("Control+Shift+KeyM");
+      await page.keyboard.type("note to self");
+      assert.ok((await docText(page)).includes("<!-- note to self -->"));
+      assert.ok(await page.$(".cm-comment"), "styled as a comment");
+      assert.equal(await page.textContent("#stWords"), "3 words", "comment text is not counted");
+      await waitFor(async () => (await page.textContent(".si-meta")).includes("3 words"), "the list agrees with the status bar");
+
+      // selected text is wrapped
+      await page.keyboard.press("Control+a");
+      await page.keyboard.press("Control+Shift+KeyM");
+      assert.ok((await docText(page)).startsWith("<!-- Real words here."), "selection wrapped");
+      await page.keyboard.press("Control+z");
+
+      // export keeps comments out
+      await sleep(900);
+      const [download] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Control+Shift+e")]);
+      const body = require("node:fs").readFileSync(await download.path(), "utf8");
+      assert.ok(body.includes("Real words here.") && !body.includes("note to self") && !body.includes("<!--"), `exported: ${JSON.stringify(body)}`);
+
+      // footnotes
+      await page.click(".cm-content");
+      await page.keyboard.press("Control+End");
+      await page.keyboard.press("Control+Shift+KeyY");
+      await page.keyboard.type("First note.");
+      await page.keyboard.press("Control+Home");
+      await page.keyboard.press("Control+Shift+KeyY");
+      const t = await docText(page);
+      assert.ok(t.includes("[^1]: First note."), t);
+      assert.ok(t.includes("[^2]: "), "second footnote gets the next number");
+      assert.ok(await page.$(".cm-fnref") && (await page.$(".cm-fndef")), "styled");
+      await page.close();
+    });
+
+    await test("the navigator lists headings, marks where you are, and jumps", async () => {
+      const long = "filler line\n\n".repeat(60);
+      const doc = `# Title\n\n${long}## Middle part\n\n${long}### Deep end\n\nlast`;
+      const { page } = await freshPage(browser, { "Long.md": [doc, 5] });
+      await page.click(".cm-content");
+      await page.keyboard.press("Control+Home");
+      await page.keyboard.press("Control+Shift+o");
+      await page.waitForSelector(".nav-item");
+      assert.deepEqual(await page.$$eval(".nav-item", (e) => e.map((x) => x.textContent)), ["Title", "Middle part", "Deep end"]);
+      assert.equal(await page.textContent(".nav-item.on"), "Title");
+      await page.click('.nav-item:has-text("Deep end")');
+      await waitFor(async () => (await page.$(".popover")) === null, "closes after jumping");
+      const head = await page.evaluate(() => {
+        const sel = getSelection();
+        return sel && sel.anchorNode ? sel.anchorNode.parentElement.closest(".cm-line").innerText : "";
+      });
+      assert.ok(head.includes("Deep end"), `cursor went to the heading (${head})`);
+      assert.ok(await page.$eval(".cm-content", (e) => e.innerText.includes("Deep end")));
+      await page.keyboard.press("Control+Shift+o");
+      assert.equal(await page.textContent(".nav-item.on"), "Deep end", "current heading is marked");
+      await page.keyboard.press("Escape");
+      assert.equal(await page.$(".popover"), null);
+
+      // a text with no headings
+      const { page: p2 } = await freshPage(browser, { "Plain.md": ["just words", 5] });
+      await p2.click("#btnNavigator");
+      assert.ok((await p2.textContent(".popover")).includes("No headings yet"));
+      await p2.close();
+      await page.close();
+    });
+
+    await test("the navigator shows each glued sheet", async () => {
+      const files = { "One.md": ["# One\n\nx", 20], "Two.md": ["# Two\n\nx", 10] };
+      const { page } = await freshPage(browser, files, [], { order: { "": ["One.md", "Two.md"] }, material: [], glue: [["One.md", "Two.md"]], filters: [] });
+      await waitFor(() => page.$(".glue-join"), "glued text");
+      await page.click("#btnNavigator");
+      await page.waitForSelector(".nav-sheet");
+      assert.deepEqual(await page.$$eval(".nav-sheet", (e) => e.map((x) => x.textContent)), ["Sheet 1", "Sheet 2"]);
+      assert.deepEqual(await page.$$eval(".nav-item", (e) => e.map((x) => x.textContent)), ["One", "Two"]);
+      await page.close();
+    });
+
+    await test("statistics: click the word count; a selection gets its own column", async () => {
+      const { page } = await freshPage(browser, { "Doc.md": ["# Heading\n\nOne sentence. Two sentences! Three?\n\nSecond paragraph <!-- hidden --> ends here.", 5] });
+      assert.equal(await page.textContent("#stWords"), "10 words");
+      await page.click("#stWords");
+      await page.waitForSelector(".stats");
+      const rows = await page.$$eval(".stat-row", (e) => e.map((r) => r.innerText.replace(/\s+/g, " ").trim()));
+      assert.ok(rows.some((r) => /^Words 10$/.test(r)), rows.join(" | "));
+      assert.ok(rows.some((r) => /^Paragraphs 3$/.test(r)), rows.join(" | "));
+      assert.ok(rows.some((r) => /^Reading time 1 min$/.test(r)));
+      await page.keyboard.press("Escape");
+      await page.click(".cm-content");
+      await page.keyboard.press("Control+Home");
+      await page.keyboard.press("Shift+End");
+      await waitFor(async () => (await page.textContent("#stWords")) === "1 of 10 words", "status shows the selection");
+      await page.click("#stWords");
+      await page.waitForSelector(".stats");
+      assert.ok((await page.textContent(".stat-head")).includes("Selection"));
+      await page.close();
+    });
+
+    await test("appearance: theme, font, size, spacing and width apply, persist and cycle", async () => {
+      const { page } = await freshPage(browser, { "Doc.md": ["# Hi\n\ntext", 5] });
+      const css = (name) => page.evaluate((n) => document.documentElement.style.getPropertyValue(n), name);
+      await page.click("#btnAppearance");
+      await page.waitForSelector(".appearance");
+      await page.click('[data-theme-id="sepia"]');
+      assert.equal(await page.getAttribute("html", "data-theme"), "sepia");
+      await page.click('[data-font="serif"]');
+      assert.ok((await css("--font-write")).includes("Georgia"));
+      await page.click('[data-width="narrow"]');
+      assert.equal(await css("--ed-width"), "38rem");
+      await page.$eval('.appearance input[aria-label="Text size"]', (e) => ((e.value = "26"), e.dispatchEvent(new Event("input", { bubbles: true }))));
+      assert.equal(await css("--ed-size"), "26px");
+      await page.$eval('.appearance input[aria-label="Line spacing"]', (e) => ((e.value = "1.5"), e.dispatchEvent(new Event("input", { bubbles: true }))));
+      assert.equal(await css("--ed-line"), "1.5");
+      assert.ok((await page.$eval(".cm-content", (e) => getComputedStyle(e).fontSize)) === "26px", "the editor really uses it");
+      const rems = await page.$eval(".cm-content", (e) => parseFloat(getComputedStyle(e).maxWidth) / parseFloat(getComputedStyle(document.documentElement).fontSize));
+      assert.equal(Math.round(rems), 38, "the column really is that wide");
+      await page.keyboard.press("Escape");
+
+      await page.reload();
+      await page.waitForSelector(".cm-content");
+      assert.equal(await page.getAttribute("html", "data-theme"), "sepia", "theme survives a reload");
+      assert.equal(await css("--ed-size"), "26px");
+      await page.click("#btnTheme");
+      assert.equal(await page.getAttribute("html", "data-theme"), "midnight", "the toolbar button cycles to the next theme");
+      await page.click("#btnTheme");
+      assert.equal(await page.getAttribute("html", "data-theme"), "auto");
+      await page.close();
+    });
+
+    await test("find and replace works and matches the app", async () => {
+      const { page } = await writeIn({ "Draft.md": ["", 5] });
+      await page.keyboard.type("cat sat on the cat mat");
+      await page.keyboard.press("Control+h");
+      await page.waitForSelector(".cm-search");
+      await page.fill('.cm-search input[name="search"]', "cat");
+      await page.fill('.cm-search input[name="replace"]', "dog");
+      await page.click('.cm-search button[name="replaceAll"]');
+      assert.equal(await docText(page), "dog sat on the dog mat");
+      await page.keyboard.press("Escape");
+      assert.equal(await page.$(".cm-search"), null);
       await page.close();
     });
 

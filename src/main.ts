@@ -1,9 +1,12 @@
 import "./styles.css";
 import { loadApi, type Api, type Group, type SearchHit, type SheetInfo, type TrashItem } from "./api";
-import { createEditor, makeState } from "./editor";
+import { addComment, createEditor, insertFootnote, jumpTo, makeState } from "./editor";
+import { applyAppearance, buildAppearancePanel, parseAppearance, THEMES, type Appearance } from "./appearance";
+import { buildNavigator, buildStats, navEntries } from "./panels";
+import { countWords, parseHeadings, stripComments, textStats } from "./text";
 import { countsTowardGoal, deadlineText, goalText, isMaterialPath, orderedSheets, progress, projectOf, projectSheets, roleOf, TEMPLATES } from "./projects";
 import { askNewProject, askProjectSettings, ROLE_LABEL } from "./projectsUi";
-import { askConfirm, askText, el, GROUP_COLORS, GROUP_ICONS, h, icon, ls, lsSet, modal, msg, showMenu, toast, whenText, type MenuItem } from "./ui";
+import { askConfirm, askText, el, GROUP_COLORS, GROUP_ICONS, h, icon, ls, lsSet, closePopover, modal, msg, showMenu, toast, togglePopover, whenText, type MenuItem } from "./ui";
 import { arrangeGroups, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta, type SectionRole } from "./meta";
 
 // ------------------------------------------------------------------ app
@@ -35,7 +38,7 @@ async function main(): Promise<void> {
     version: 0,
     savedVersion: 0,
     typewriter: ls("typewriter") === "1",
-    theme: ls("theme") ?? "auto",
+    appearance: parseAppearance(ls("appearance"), ls("theme")) as Appearance,
     noLib: ls("noLib") === "1",
     /** the project the sidebar is focused on (see "Projects"), or null for the whole library */
     project: (ls("project") || null) as string | null,
@@ -59,7 +62,7 @@ async function main(): Promise<void> {
 
   // -------- editor
   const view = createEditor(el("editor"));
-  const hooks = { onChange: onDocChanged, isTypewriter: () => S.typewriter };
+  const hooks = { onChange: onDocChanged, isTypewriter: () => S.typewriter, smartTypography: () => S.appearance.typography, onSelection: () => updateStats() };
   const setDoc = (text: string, glued = false, readOnly = false) => view.setState(makeState(text, hooks, glued, readOnly));
   setDoc("");
 
@@ -69,20 +72,49 @@ async function main(): Promise<void> {
   el("btnNewGroup").append(icon("folderPlus"));
   el("btnNewSheet").append(icon("plus"));
   el("btnTypewriter").append(icon("type"));
+  el("btnNavigator").append(icon("outline"));
+  el("btnAppearance").append(icon("aa"));
   el("btnTheme").append(icon("theme"));
   el("btnExport").append(icon("export"));
   el("btnFocus").append(icon("focus"));
 
   // -------- theme / modes
   function applyTheme(): void {
-    document.documentElement.dataset.theme = S.theme;
-    el("btnTheme").title = `Theme: ${S.theme} (Ctrl/Cmd+Shift+D)`;
+    applyAppearance(S.appearance);
+    el("btnTheme").title = `Theme: ${S.appearance.theme} (Ctrl/Cmd+Shift+D)`;
+  }
+  function saveAppearance(a: Appearance): void {
+    S.appearance = a;
+    lsSet("appearance", JSON.stringify(a));
+    lsSet("theme", a.theme);
+    applyTheme();
   }
   function cycleTheme(): void {
-    S.theme = S.theme === "auto" ? "light" : S.theme === "light" ? "dark" : "auto";
-    lsSet("theme", S.theme);
-    applyTheme();
-    toast(`Theme: ${S.theme}`);
+    const i = THEMES.findIndex((t) => t.id === S.appearance.theme);
+    const next = THEMES[(i + 1) % THEMES.length];
+    saveAppearance({ ...S.appearance, theme: next.id });
+    toast(`Theme: ${next.label}`);
+  }
+  const editorCommand = (fn: (v: typeof view) => boolean) => (): void => void fn(view);
+
+  function showAppearance(): void {
+    togglePopover(el("btnAppearance"), buildAppearancePanel(S.appearance, saveAppearance, { addComment: editorCommand(addComment), insertFootnote: editorCommand(insertFootnote) }), { align: "right" });
+  }
+
+  function showNavigator(): void {
+    const doc = view.state.doc.toString();
+    const joins: number[] = [];
+    for (let i = doc.indexOf(GLUE_JOIN); i >= 0; i = doc.indexOf(GLUE_JOIN, i + GLUE_JOIN.length)) joins.push(i + GLUE_JOIN.length);
+    // headings are measured in the real text, so their offsets are valid for jumping
+    const entries = navEntries(parseHeadings(doc), joins);
+    togglePopover(el("btnNavigator"), buildNavigator(entries, view.state.selection.main.head, (from) => (jumpTo(view, from), closePopover())), { align: "right" });
+  }
+
+  function showStats(): void {
+    const text = view.state.doc.toString().split(GLUE_JOIN).join("\n\n");
+    const sel = view.state.selection.main;
+    const picked = sel.empty ? "" : view.state.sliceDoc(sel.from, sel.to);
+    togglePopover(el("stWords"), buildStats(textStats(text), picked.trim() ? textStats(picked) : null), { above: true });
   }
   function applyTypewriter(): void {
     document.body.classList.toggle("typewriter", S.typewriter);
@@ -118,10 +150,14 @@ async function main(): Promise<void> {
   // -------- status bar
   function updateStats(): void {
     const text = view.state.doc.toString().split(GLUE_JOIN).join("\n\n");
-    const words = (text.match(/\S+/g) ?? []).length;
-    el("stWords").textContent = `${words.toLocaleString()} ${words === 1 ? "word" : "words"}`;
-    el("stChars").textContent = `${text.length.toLocaleString()} characters`;
-    el("stRead").textContent = isMaterial(S.current) ? "Material · not counted in totals" : `${Math.max(words ? 1 : 0, Math.ceil(words / 220))} min read`;
+    const words = countWords(text);
+    const sel = view.state.selection.main;
+    const picked = sel.empty ? "" : view.state.sliceDoc(sel.from, sel.to);
+    const selWords = picked ? countWords(picked) : 0;
+    const w = (n: number) => `${n.toLocaleString()} ${n === 1 ? "word" : "words"}`;
+    el("stWords").textContent = selWords ? `${selWords.toLocaleString()} of ${w(words)}` : w(words);
+    el("stChars").textContent = picked.trim() ? `${picked.length.toLocaleString()} of ${text.length.toLocaleString()} characters` : `${text.length.toLocaleString()} characters`;
+    el("stRead").textContent = isMaterial(S.current) ? "Material · not counted in totals" : `${words ? Math.max(1, Math.ceil(words / 220)) : 0} min read`;
   }
   function setSave(text: string): void {
     el("stSave").textContent = text;
@@ -1411,9 +1447,9 @@ async function main(): Promise<void> {
     await flushSave();
     try {
       const glued = glueOf(S.meta, path);
-      const out = glued
-        ? await api.exportText((await Promise.all(glued.map((p) => api.readSheet(p)))).join("\n\n"), titleOf(glued[0]))
-        : await api.exportSheet(path, titleOf(path));
+      // comments are annotations for you: they never reach an export
+      const text = glued ? (await Promise.all(glued.map((p) => api.readSheet(p)))).join("\n\n") : await api.readSheet(path);
+      const out = glued || text.includes("<!--") ? await api.exportText(stripComments(text), titleOf(glued?.[0] ?? path)) : await api.exportSheet(path, titleOf(path));
       if (out) toast(`Exported to ${out}`);
     } catch (e) {
       toast(msg(e));
@@ -1436,7 +1472,7 @@ async function main(): Promise<void> {
         toast("Nothing to export: this group has no sheets that aren't material");
         return;
       }
-      const out = await api.exportText(parts.join("\n\n"), g.path === "" ? "Library" : g.name);
+      const out = await api.exportText(stripComments(parts.join("\n\n")), g.path === "" ? "Library" : g.name);
       if (out) toast(`Exported to ${out}`);
     } catch (e) {
       toast(msg(e));
@@ -1794,6 +1830,9 @@ async function main(): Promise<void> {
   el("btnSidebar2").addEventListener("click", toggleSidebar);
   el("btnTypewriter").addEventListener("click", toggleTypewriter);
   el("btnTheme").addEventListener("click", cycleTheme);
+  el("btnNavigator").addEventListener("click", showNavigator);
+  el("btnAppearance").addEventListener("click", showAppearance);
+  el("stWords").addEventListener("click", showStats);
   el("btnExport").addEventListener("click", () => void exportSheet());
   el("btnFocus").addEventListener("click", toggleFocus);
 
@@ -1819,6 +1858,8 @@ async function main(): Promise<void> {
     });
     else if (k === "Backslash" && !e.shiftKey) run(toggleSidebar);
     else if (k === "KeyO" && !e.shiftKey) run(() => void quickOpen());
+    else if (k === "KeyO" && e.shiftKey) run(showNavigator);
+    else if (k === "Comma" && !e.shiftKey) run(showAppearance);
     else if (k === "KeyT" && e.shiftKey) run(toggleTypewriter);
     else if (k === "KeyD" && e.shiftKey) run(cycleTheme);
     else if (k === "KeyF" && e.shiftKey) run(toggleFocus);

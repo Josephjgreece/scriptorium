@@ -48,6 +48,8 @@ export const ICONS: Record<string, string> = {
   export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
+  outline: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+  aa: '<path d="M3.5 18L8 6.5 12.5 18M5.2 14h5.6M14.5 18l3-8 3 8M15.7 16h4.6"/>',
   sidebar: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M9.5 5v14"/>',
   book: '<path d="M5 4.5h10a3 3 0 0 1 3 3V20H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h10"/>',
   star: '<path d="M12 4l2.4 5 5.4.7-4 3.8 1 5.4L12 16.3 7.2 18.9l1-5.4-4-3.8 5.4-.7z"/>',
@@ -202,3 +204,47 @@ export function showMenu(x: number, y: number, items: MenuItem[]): void {
   });
 }
 
+
+// ------------------------------------------------------------------ popovers
+
+let openPop: { close: () => void; owner: HTMLElement } | null = null;
+
+export function closePopover(): void {
+  openPop?.close();
+}
+
+/** A small panel attached to a button. Clicking the button again, clicking away or Escape closes it. */
+export function togglePopover(anchor: HTMLElement, content: HTMLElement, opts: { align?: "left" | "right"; above?: boolean } = {}): void {
+  if (openPop?.owner === anchor) {
+    openPop.close();
+    return;
+  }
+  openPop?.close();
+  const pop = h("div", { class: "popover", role: "dialog" }, content);
+  document.body.append(pop);
+  const a = anchor.getBoundingClientRect();
+  const r = pop.getBoundingClientRect();
+  const x = Math.max(8, Math.min(opts.align === "right" ? a.right - r.width : a.left, innerWidth - r.width - 8));
+  const y = opts.above ? a.top - r.height - 8 : a.bottom + 8;
+  pop.style.left = `${x}px`;
+  pop.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
+  const away = (e: Event) => {
+    if (!pop.contains(e.target as Node) && !anchor.contains(e.target as Node)) close();
+  };
+  const esc = (e: KeyboardEvent) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  };
+  const close = () => {
+    pop.remove();
+    window.removeEventListener("mousedown", away, true);
+    window.removeEventListener("keydown", esc, true);
+    if (openPop?.close === close) openPop = null;
+  };
+  window.addEventListener("mousedown", away, true);
+  window.addEventListener("keydown", esc, true);
+  openPop = { close, owner: anchor };
+}

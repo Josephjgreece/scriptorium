@@ -1,3 +1,5 @@
+import { countWords, stripComments } from "./text";
+
 // Backend bridge. In the desktop app every call goes to the Rust side (plain files on disk).
 // In a plain browser (`npm run dev` without Tauri) a localStorage-backed stand-in is used so
 // the UI can be developed and tested without building the desktop shell.
@@ -189,7 +191,7 @@ function cleanTitle(line: string): string {
   return line.trim().replace(/^[#>\s]+/, "").replace(/[*_`]/g, "").trim();
 }
 function titleAndPreview(text: string, fallback: string): [string, string] {
-  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines = stripComments(text).split("\n").map((l) => l.trim()).filter(Boolean);
   const title = lines[0] ? cleanTitle(lines[0]) || fallback : fallback;
   return [title, (lines[1] ?? "").slice(0, 140)];
 }
@@ -267,7 +269,7 @@ function webApi(): Api {
         .map((p) => {
           const f = store.files[p];
           const [title, preview] = titleAndPreview(f.content, baseOf(p).replace(/\.md$/, ""));
-          return { path: p, title, preview, modified: Math.floor(f.modified / 1000), words: (f.content.match(/\S+/g) ?? []).length, conflict: conflictOf(p) !== null, original: conflictOf(p) && conflictOf(p)! in store.files ? conflictOf(p) : null };
+          return { path: p, title, preview, modified: Math.floor(f.modified / 1000), words: countWords(f.content), conflict: conflictOf(p) !== null, original: conflictOf(p) && conflictOf(p)! in store.files ? conflictOf(p) : null };
         })
         .sort((a, b) => b.modified - a.modified || a.title.localeCompare(b.title));
     },
@@ -350,7 +352,7 @@ function webApi(): Api {
       return (store.trash ?? [])
         .map((r): TrashItem => {
           const files = Object.entries(r.files);
-          const words = files.reduce((n, [, f]) => n + (f.content.match(/\S+/g) ?? []).length, 0);
+          const words = files.reduce((n, [, f]) => n + countWords(f.content), 0);
           if (r.group) {
             return { id: r.id, name: baseOf(r.original), title: baseOf(r.original), preview: `${files.length} ${files.length === 1 ? "sheet" : "sheets"}`, isGroup: true, original: r.original, deleted: Math.floor(r.deleted / 1000), sheets: files.length, words };
           }
