@@ -18,7 +18,7 @@ A writing app can't lose text, and a synced folder makes that harder.
 
 | Item | Why | Effort |
 |---|---|---|
-| Build the desktop app in CI (Windows, macOS, Linux) | The Tauri side has never been compiled in this project's dev environment, so the Rust commands are unproven in the real shell | M |
+| Build the desktop app in CI (Windows x64 + ARM64 done in `.github/workflows/windows-build.yml`; macOS and Linux still to add) | The Tauri side has never been compiled in this project's dev environment, so the Rust commands are unproven in the real shell | M |
 | Unit tests for `meta.ts`; commit the browser end-to-end test | Order, glue and remap logic is easy to break | S |
 | Atomic sheet writes (temp file, then rename) | A crash mid-save can corrupt a sheet | S |
 | Save-failure recovery: keep unsaved text, retry, warn on quit | Today "Not saved" is only a toast | S |
