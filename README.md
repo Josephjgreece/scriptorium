@@ -21,7 +21,7 @@ Default location: `Documents/Scriptorium`. Change it from the sidebar, or fix it
 - Right-click a group → Export group… joins its sheets in your order, skipping material
 - **Sync-safe**: put the library in any synced folder (Dropbox, iCloud Drive, Proton Drive, ...). Changes made elsewhere appear within seconds, the structure file is merged between devices, and conflicted copies are flagged under Conflicts. Text you typed is never allowed to overwrite a version changed elsewhere: it is kept as a conflicted copy
 - Choose the library folder from the button at the bottom of the sidebar
-- Delete moves things to `.trash` inside the library, nothing is lost
+- Delete moves things to the **Trash** (a `.trash` folder inside the library). Browse it from the sidebar, preview read-only, restore to the original group, delete permanently or empty it; nothing is removed for good without asking
 - Export to DOCX / PDF / HTML / ODT / EPUB through [Pandoc](https://pandoc.org) (install it separately; PDF also needs a LaTeX engine)
 
 | Shortcut (Ctrl, or Cmd on Mac) | Action |

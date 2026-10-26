@@ -19,7 +19,7 @@ A writing app can't lose text, and a synced folder makes that harder.
 | Item | Status |
 |---|---|
 | Desktop app built in CI | Windows x64 + ARM64 installers (`windows-build.yml`); Linux and macOS compile, test and run the browser tests (`ci.yml`). macOS and Linux installers come with Phase 6 |
-| Tests | 19 unit tests for the structure model and merge (`npm test`), 15 Rust tests, 5 browser end-to-end scenarios (`npm run test:e2e`) |
+| Tests | 19 unit tests for the structure model and merge (`npm test`), 20 Rust tests, 7 browser end-to-end scenarios (`npm run test:e2e`) |
 | Atomic sheet writes | Done: temp file, then rename |
 | Save-failure recovery | Done: retries every 5 s, text stashed and recovered as a copy on next start, warning before closing with unsaved text |
 | File watcher | Done: reloads the open sheet and the lists when files change outside the app (polling a cheap fingerprint every 2.5 s and on window focus) |
@@ -31,7 +31,7 @@ Known gaps: the save-retry path is covered by reasoning and Rust tests, not an a
 
 ## Phase 1: Library parity
 
-- Trash view: browse, restore, empty `.trash` (S)
+- ~~Trash view~~ **done**: a Trash row in the sidebar; deleted sheets and groups remember where they came from, preview read-only, restore to their original group (recreated if gone), delete permanently or empty, each with a confirmation. Material marks and manual position are not remembered across a delete
 - Top toolbar across the window: sidebar toggle, search and new sheet left; export, goal, navigator, style right (M)
 - Keyboard navigation in sidebar and list; Ctrl+O quick open; rename sheet (M)
 - Sidebar polish: collapsible, drag to reorder groups, group icons (M)

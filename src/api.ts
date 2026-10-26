@@ -19,6 +19,19 @@ export interface SheetInfo {
   /** for a conflicted copy: the sheet it was copied from, when that still exists */
   original: string | null;
 }
+export interface TrashItem {
+  /** the entry's name inside .trash; what the trash calls take */
+  id: string;
+  name: string;
+  title: string;
+  preview: string;
+  isGroup: boolean;
+  /** where it was before it was deleted ("" when unknown) */
+  original: string;
+  deleted: number;
+  sheets: number;
+  words: number;
+}
 export interface SearchHit {
   path: string;
   title: string;
@@ -42,6 +55,12 @@ export interface Api {
   exportSheet(path: string, suggestedName: string): Promise<string | null>;
   /** Export text that isn't one file on disk (glued sheets). */
   exportText(content: string, suggestedName: string): Promise<string | null>;
+  listTrash(): Promise<TrashItem[]>;
+  readTrash(id: string): Promise<string>;
+  /** Put an item back where it came from; returns its new path. */
+  restoreTrash(id: string): Promise<string>;
+  purgeTrash(id: string): Promise<void>;
+  emptyTrash(): Promise<number>;
   /** True when the library folder is fixed by the SCRIPTORIUM_LIBRARY environment variable. */
   libraryLocked(): Promise<boolean>;
   /** Ask for a folder and switch to it; returns its path, or null if cancelled. */
@@ -89,6 +108,11 @@ async function tauriApi(): Promise<Api> {
       await invoke("export_text", { content, dest });
       return dest;
     },
+    listTrash: () => invoke("list_trash"),
+    readTrash: (id) => invoke("read_trash_sheet", { id }),
+    restoreTrash: (id) => invoke("restore_trash", { id }),
+    purgeTrash: (id) => invoke("purge_trash", { id }),
+    emptyTrash: () => invoke("empty_trash"),
     libraryLocked: () => invoke("library_locked"),
     async chooseLibrary() {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -123,9 +147,19 @@ interface MockFile {
   content: string;
   modified: number;
 }
+interface TrashRec {
+  id: string;
+  original: string;
+  group: boolean;
+  /** paths relative to the deleted item (a sheet is just its own name) */
+  files: Record<string, MockFile>;
+  dirs: string[];
+  deleted: number;
+}
 interface MockStore {
   files: Record<string, MockFile>;
   dirs: string[];
+  trash?: TrashRec[];
 }
 
 const KEY = "scriptorium-web-library";
@@ -298,10 +332,68 @@ function webApi(): Api {
       return target;
     },
     async deleteItem(path) {
+      reload();
+      const rec: TrashRec = { id: `${Date.now()}-${baseOf(path)}`, original: path, group: !(path in store.files), files: {}, dirs: [], deleted: Date.now() };
+      if (path in store.files) rec.files[baseOf(path)] = store.files[path];
+      else {
+        for (const [p, f] of Object.entries(store.files)) if (p.startsWith(path + "/")) rec.files[p.slice(path.length + 1)] = f;
+        rec.dirs = store.dirs.filter((d) => d.startsWith(path + "/")).map((d) => d.slice(path.length + 1));
+      }
+      (store.trash ??= []).push(rec);
       delete store.files[path];
       store.dirs = store.dirs.filter((d) => d !== path && !d.startsWith(path + "/"));
       for (const p of Object.keys(store.files)) if (p.startsWith(path + "/")) delete store.files[p];
       persist();
+    },
+    async listTrash() {
+      reload();
+      return (store.trash ?? [])
+        .map((r): TrashItem => {
+          const files = Object.entries(r.files);
+          const words = files.reduce((n, [, f]) => n + (f.content.match(/\S+/g) ?? []).length, 0);
+          if (r.group) {
+            return { id: r.id, name: baseOf(r.original), title: baseOf(r.original), preview: `${files.length} ${files.length === 1 ? "sheet" : "sheets"}`, isGroup: true, original: r.original, deleted: Math.floor(r.deleted / 1000), sheets: files.length, words };
+          }
+          const [title, preview] = titleAndPreview(files[0][1].content, baseOf(r.original).replace(/\.md$/, ""));
+          return { id: r.id, name: baseOf(r.original), title, preview, isGroup: false, original: r.original, deleted: Math.floor(r.deleted / 1000), sheets: 1, words };
+        })
+        .sort((a, b) => b.deleted - a.deleted || a.title.localeCompare(b.title));
+    },
+    async readTrash(id) {
+      reload();
+      const r = store.trash?.find((x) => x.id === id);
+      return r && !r.group ? Object.values(r.files)[0].content : fail("Not in the trash");
+    },
+    async restoreTrash(id) {
+      reload();
+      const r = store.trash?.find((x) => x.id === id);
+      if (!r) return fail("Not in the trash");
+      const parent = parentOf(r.original);
+      for (let d = parent; d; d = parentOf(d)) if (!store.dirs.includes(d)) store.dirs.push(d);
+      let target: string;
+      if (r.group) {
+        target = unique(parent, baseOf(r.original), "");
+        store.dirs.push(target, ...r.dirs.map((d) => join(target, d)));
+        for (const [rel, f] of Object.entries(r.files)) store.files[join(target, rel)] = f;
+      } else {
+        target = unique(parent, baseOf(r.original).replace(/\.md$/, ""), "md");
+        store.files[target] = Object.values(r.files)[0];
+      }
+      store.trash = store.trash!.filter((x) => x.id !== id);
+      persist();
+      return target;
+    },
+    async purgeTrash(id) {
+      reload();
+      store.trash = (store.trash ?? []).filter((x) => x.id !== id);
+      persist();
+    },
+    async emptyTrash() {
+      reload();
+      const n = store.trash?.length ?? 0;
+      store.trash = [];
+      persist();
+      return n;
     },
     async moveItem(path, destGroup) {
       if (parentOf(path) === destGroup) return path;

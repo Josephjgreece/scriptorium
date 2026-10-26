@@ -88,7 +88,7 @@ export interface EditorHooks {
 }
 
 /** A fresh state per sheet, so undo history never leaks from one sheet into the next. */
-export function makeState(doc: string, hooks: EditorHooks, glued = false): EditorState {
+export function makeState(doc: string, hooks: EditorHooks, glued = false, readOnly = false): EditorState {
   const extensions: Extension[] = [
     history(),
     drawSelection(),
@@ -96,6 +96,7 @@ export function makeState(doc: string, hooks: EditorHooks, glued = false): Edito
     markdown({ base: markdownLanguage }),
     syntaxHighlighting(prose),
     theme,
+    ...(readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
     ...(glued ? [joinDecos, protectJoins, EditorView.atomicRanges.of((v) => v.state.field(joinDecos))] : []),
     EditorView.contentAttributes.of({ spellcheck: "true", autocapitalize: "sentences", "aria-label": "Sheet text" }),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),

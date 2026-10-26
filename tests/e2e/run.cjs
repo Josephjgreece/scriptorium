@@ -207,6 +207,79 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       await page.close();
     });
 
+    console.log("Trash");
+    await test("deleted sheets go to the Trash, preview read-only, and restore to where they were", async () => {
+      const files = { "Book/Chapter.md": ["# Chapter\n\nImportant words.", 30], "Note.md": ["# Note\n\nhi", 20] };
+      const { page, disk } = await freshPage(browser, files, ["Book"]);
+      assert.equal(await page.textContent('.row:has-text("Trash")'), "Trash");
+      await page.click('.row:has-text("Book")');
+      await row(page, "Chapter").click({ button: "right" });
+      await page.click('.menu-item:has-text("Delete sheet")');
+      await waitFor(async () => (await titles(page)).length === 0, "sheet leaves the group");
+      assert.equal(await page.textContent('.row:has-text("Trash") .count'), "1");
+      assert.ok(!("Book/Chapter.md" in (await disk.files())), "gone from the library");
+
+      await page.click('.row:has-text("Trash")');
+      await waitFor(async () => (await titles(page)).join() === "Chapter", "trash lists it");
+      assert.ok((await page.textContent(".sheet-item.trash .si-meta")).includes("from Book"));
+      await row(page, "Chapter").click();
+      await waitFor(() => page.$("body.previewing-trash"), "trash bar");
+      assert.ok((await page.$eval(".cm-content", (e) => e.innerText)).includes("Important words."));
+      await page.click(".cm-content");
+      await page.keyboard.type("SHOULD NOT APPEAR");
+      await sleep(1000);
+      assert.ok(!(await page.$eval(".cm-content", (e) => e.innerText)).includes("SHOULD NOT APPEAR"), "read-only");
+      assert.equal(Object.keys(await disk.files()).length, 1, "preview wrote nothing");
+
+      await page.click("#btnTrashRestore");
+      await waitFor(async () => "Book/Chapter.md" in (await disk.files()), "restored on disk");
+      await waitFor(async () => (await titles(page)).join() === "Chapter", "shown in its group again");
+      assert.equal(await page.$("body.previewing-trash"), null);
+      assert.ok((await page.$eval(".cm-content", (e) => e.innerText)).includes("Important words."), "opened for editing");
+      assert.equal(await page.$('.row:has-text("Trash") .count'), null, "trash count cleared");
+      await page.close();
+    });
+
+    await test("a deleted group comes back whole; permanent delete and Empty Trash ask first", async () => {
+      const files = { "Book/One.md": ["# One\n\na", 30], "Book/Two.md": ["# Two\n\nb", 20], "Keep.md": ["# Keep", 10], "X.md": ["# X", 9], "Y.md": ["# Y", 8] };
+      const { page, disk } = await freshPage(browser, files, ["Book"]);
+      await page.locator('.row:has-text("Book")').click({ button: "right" });
+      await page.click('.menu-item:has-text("Delete group")');
+      await page.click(".modal .btn.primary");
+      await waitFor(async () => !("Book/One.md" in (await disk.files())), "group removed");
+      await page.click('.row:has-text("Trash")');
+      await waitFor(async () => (await titles(page)).join() === "Book", "group in trash");
+      assert.ok((await page.textContent(".sheet-item.trash .si-prev")).includes("2 sheets"));
+      await row(page, "Book").click({ button: "right" });
+      await page.click('.menu-item:has-text("Restore")');
+      await waitFor(async () => "Book/One.md" in (await disk.files()) && "Book/Two.md" in (await disk.files()), "group restored with its sheets");
+      assert.deepEqual((await titles(page)).sort(), ["One", "Two"]);
+
+      // permanent delete: cancel keeps it, confirm removes it
+      for (const f of ["X", "Y"]) {
+        await page.click('.row:has-text("Inbox")');
+        await row(page, f).click({ button: "right" });
+        await page.click('.menu-item:has-text("Delete sheet")');
+      }
+      await page.click('.row:has-text("Trash")');
+      await waitFor(async () => (await titles(page)).length === 2, "two in trash");
+      await row(page, "X").click({ button: "right" });
+      await page.click('.menu-item:has-text("Delete permanently")');
+      await page.click(".modal .btn:not(.primary)");
+      assert.equal((await titles(page)).length, 2, "cancel keeps it");
+      await row(page, "X").click({ button: "right" });
+      await page.click('.menu-item:has-text("Delete permanently")');
+      await page.click(".modal .btn.primary");
+      await waitFor(async () => (await titles(page)).join() === "Y", "X gone for good");
+
+      await page.click(".lt-btn.danger");
+      await page.click(".modal .btn.primary");
+      await waitFor(async () => (await titles(page)).length === 0, "trash emptied");
+      assert.ok((await page.textContent(".sheets")).includes("The Trash is empty."));
+      assert.ok("Keep.md" in (await disk.files()), "the library is untouched");
+      await page.close();
+    });
+
     console.log("Two devices, one structure file");
     await test("structure changes made on two devices are merged, not overwritten", async () => {
       const files = { "A.md": ["# A\n\ndraft", 40], "Research.md": ["# Research\n\nherons", 30], "Notes.md": ["# Notes\n\nbits", 20] };

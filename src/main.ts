@@ -1,7 +1,7 @@
 import "./styles.css";
-import { loadApi, type Api, type Group, type SearchHit, type SheetInfo } from "./api";
+import { loadApi, type Api, type Group, type SearchHit, type SheetInfo, type TrashItem } from "./api";
 import { createEditor, makeState } from "./editor";
-import { arrange, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
+import { arrange, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
 
 // ------------------------------------------------------------------ small helpers
 
@@ -52,6 +52,7 @@ const ICONS: Record<string, string> = {
   export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
+  trash: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12M10.5 10.5v6M13.5 10.5v6"/>',
   warn: '<path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.2M12 16.8v.2"/>',
   folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   funnel: '<path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/>',
@@ -196,7 +197,7 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
 async function main(): Promise<void> {
   const api: Api = await loadApi();
 
-  type View = { kind: "all" } | { kind: "recent" } | { kind: "conflicts" } | { kind: "filter"; id: string } | { kind: "group"; path: string };
+  type View = { kind: "all" } | { kind: "recent" } | { kind: "conflicts" } | { kind: "trash" } | { kind: "filter"; id: string } | { kind: "group"; path: string };
   const S = {
     tree: null as Group | null,
     view: { kind: "group", path: "" } as View,
@@ -209,6 +210,9 @@ async function main(): Promise<void> {
     meta: emptyMeta() as Meta,
     /** every sheet in the library, refreshed with the lists */
     all: [] as SheetInfo[],
+    trash: [] as TrashItem[],
+    /** id of the trashed sheet shown read-only in the editor */
+    trashPreview: null as string | null,
     /** keys (first path) of the selected list rows */
     sel: new Set<string>(),
     anchor: null as string | null,
@@ -237,7 +241,7 @@ async function main(): Promise<void> {
   // -------- editor
   const view = createEditor(el("editor"));
   const hooks = { onChange: onDocChanged, isTypewriter: () => S.typewriter };
-  const setDoc = (text: string, glued = false) => view.setState(makeState(text, hooks, glued));
+  const setDoc = (text: string, glued = false, readOnly = false) => view.setState(makeState(text, hooks, glued, readOnly));
   setDoc("");
 
   // -------- icons on static buttons
@@ -487,6 +491,7 @@ async function main(): Promise<void> {
     try {
       S.tree = await api.listTree();
       S.all = await api.listSheets("", true);
+      S.trash = await api.listTrash();
       S.sheets = await loadSheets();
     } catch (e) {
       // The group we were looking at may be gone; fall back to the root.
@@ -494,6 +499,7 @@ async function main(): Promise<void> {
       try {
         S.tree = await api.listTree();
         S.all = await api.listSheets("", true);
+        S.trash = await api.listTrash();
         S.sheets = await api.listSheets("", false);
       } catch (e2) {
         toast(msg(e2 ?? e));
@@ -513,6 +519,7 @@ async function main(): Promise<void> {
       const since = Date.now() / 1000 - RECENT_SECS;
       return S.all.filter((x) => x.modified >= since);
     }
+    if (v.kind === "trash") return []; // the Trash has its own list
     // a saved filter: text, group and recency, all of which must match
     const f = S.meta.filters.find((x) => x.id === v.id);
     if (!f) return [];
@@ -531,7 +538,7 @@ async function main(): Promise<void> {
   function renderTree(): void {
     treeEl.replaceChildren();
     if (!S.tree) return;
-    const smartRow = (kind: "all" | "recent" | "conflicts", ico: string, label: string, count = 0): HTMLElement =>
+    const smartRow = (kind: "all" | "recent" | "conflicts" | "trash", ico: string, label: string, count = 0): HTMLElement =>
       h(
         "div",
         { class: "row" + (S.view.kind === kind ? " active" : "") + (kind === "conflicts" ? " warn" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind }) },
@@ -544,6 +551,7 @@ async function main(): Promise<void> {
     // only shown when a sync service has left conflicted copies behind
     const conflicts = S.all.filter((x) => x.conflict).length;
     if (conflicts || S.view.kind === "conflicts") treeEl.append(smartRow("conflicts", "warn", "Conflicts", conflicts));
+    treeEl.append(smartRow("trash", "trash", "Trash", S.trash.length));
 
     treeEl.append(
       h(
@@ -641,6 +649,7 @@ async function main(): Promise<void> {
   }
 
   async function selectView(v: View): Promise<void> {
+    if (S.trashPreview && v.kind !== "trash") leaveTrashPreview();
     S.view = v;
     searchEl.value = "";
     S.hits = null;
@@ -692,6 +701,13 @@ async function main(): Promise<void> {
       return;
     }
     const v = S.view;
+    if (v.kind === "trash") {
+      listTitle.append(h("span", { class: "lt-name" }, "Trash"));
+      if (S.trash.length) listTitle.append(h("button", { class: "lt-btn danger", onclick: () => void emptyTrashAll() }, "Empty Trash"));
+      if (!S.trash.length) sheetsEl.append(h("div", { class: "none" }, "The Trash is empty."));
+      for (const t of S.trash) sheetsEl.append(trashRow(t));
+      return;
+    }
     const name =
       v.kind === "all" ? "All" : v.kind === "recent" ? "Last 7 Days" : v.kind === "conflicts" ? "Conflicts" : v.kind === "filter" ? (S.meta.filters.find((f) => f.id === v.id)?.name ?? "Filter") : v.path === "" ? "Inbox" : (v.path.split("/").pop() ?? "");
     const words = S.sheets.filter((x) => !isMaterial(x.path)).reduce((n, x) => n + x.words, 0);
@@ -909,6 +925,7 @@ async function main(): Promise<void> {
       return;
     }
     await flushSave();
+    if (S.trashPreview) clearTrashPreview();
     const paths = g ?? [path];
     try {
       const texts = await Promise.all(paths.map((p) => api.readSheet(p)));
@@ -998,14 +1015,14 @@ async function main(): Promise<void> {
   }
 
   async function deleteGroup(g: Group): Promise<void> {
-    const ok = await askConfirm(`Delete “${g.name}”?`, "The group and everything in it moves to the .trash folder inside your library, so it can be recovered.", "Delete");
+    const ok = await askConfirm(`Delete “${g.name}”?`, "The group and everything in it moves to the Trash, so you can restore it later.", "Delete");
     if (!ok) return;
     await flushSave();
     try {
       await api.deleteItem(g.path);
       afterDelete((p) => p === g.path || p.startsWith(g.path + "/"));
       await refresh();
-      toast("Moved to .trash");
+      toast("Moved to the Trash");
     } catch (e) {
       toast(msg(e));
     }
@@ -1021,7 +1038,7 @@ async function main(): Promise<void> {
     afterDelete((p) => paths.includes(p));
     if (S.hits) S.hits = S.hits.filter((x) => !paths.includes(x.path));
     await refresh();
-    toast("Moved to .trash");
+    toast("Moved to the Trash");
   }
 
   async function moveTo(paths: string[], group: string): Promise<void> {
@@ -1036,6 +1053,114 @@ async function main(): Promise<void> {
     await refresh();
   }
 
+  // -------- trash
+  const whereText = (path: string): string => (path ? groupOf(path) : "somewhere");
+
+  function trashRow(t: TrashItem): HTMLElement {
+    const row = h(
+      "div",
+      { class: "sheet-item trash" + (S.trashPreview === t.id ? " selected" : ""), "data-id": t.id },
+      h("div", { class: "si-head" }, h("div", { class: "si-title" }, t.title || "Untitled"), t.isGroup ? h("span", { class: "si-badge" }, icon("folder")) : null),
+      h("div", { class: "si-prev" }, t.preview),
+      h("div", { class: "si-meta" }, [`Deleted ${whenText(t.deleted)}`, plural(t.words, "word"), t.original ? `from ${whereText(t.original)}` : ""].filter(Boolean).join(" · ")),
+    );
+    row.addEventListener("click", () => void previewTrash(t));
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, [
+        { label: "Restore", run: () => void restoreTrashItem(t) },
+        { label: "Delete permanently…", run: () => void purgeTrashItem(t), danger: true, sep: true },
+      ]);
+    });
+    return row;
+  }
+
+  function clearTrashPreview(): void {
+    S.trashPreview = null;
+    document.body.classList.remove("previewing-trash");
+  }
+  function leaveTrashPreview(): void {
+    clearTrashPreview();
+    closeEditor();
+  }
+
+  /** Show a trashed sheet read-only, with a bar to restore it. */
+  async function previewTrash(t: TrashItem): Promise<void> {
+    await flushSave();
+    try {
+      const text = t.isGroup ? `This group and its ${plural(t.sheets, "sheet")} are in the Trash.\n\nRestore it to read and edit them again.` : await api.readTrash(t.id);
+      S.current = null;
+      S.glue = null;
+      S.savedParts = [];
+      S.version = S.savedVersion = 0;
+      S.trashPreview = t.id;
+      document.body.classList.add("previewing-trash");
+      el("trashBarText").textContent = t.isGroup ? `The group “${t.name}” is in the Trash.` : `“${t.title}” is in the Trash. It is read-only here.`;
+      setDoc(text, false, true);
+      setHasNone(false);
+      document.body.classList.remove("is-material");
+      crumb.textContent = `Trash  ›  ${t.title}`;
+      updateStats();
+      renderSheets();
+    } catch (e) {
+      toast(msg(e));
+      await refresh();
+    }
+  }
+
+  async function restoreTrashItem(t: TrashItem): Promise<void> {
+    try {
+      const np = await api.restoreTrash(t.id);
+      if (S.trashPreview === t.id) leaveTrashPreview();
+      searchEl.value = "";
+      S.hits = null;
+      S.view = { kind: "group", path: t.isGroup ? np : parentOf(np) };
+      await refresh();
+      if (!t.isGroup) await openSheet(np);
+      toast(`Restored “${t.title}”`);
+    } catch (e) {
+      toast(msg(e));
+      await refresh();
+    }
+  }
+
+  async function purgeTrashItem(t: TrashItem): Promise<void> {
+    const ok = await askConfirm(`Delete “${t.title}” permanently?`, "It will be gone for good. This can't be undone.", "Delete permanently");
+    if (!ok) return;
+    try {
+      await api.purgeTrash(t.id);
+      if (S.trashPreview === t.id) leaveTrashPreview();
+      await refresh();
+      toast("Deleted permanently");
+    } catch (e) {
+      toast(msg(e));
+    }
+  }
+
+  async function emptyTrashAll(): Promise<void> {
+    const n = S.trash.length;
+    if (!n) return;
+    const ok = await askConfirm("Empty the Trash?", `${plural(n, "item")} will be deleted for good. This can't be undone.`, "Empty Trash");
+    if (!ok) return;
+    try {
+      await api.emptyTrash();
+      if (S.trashPreview) leaveTrashPreview();
+      await refresh();
+      toast("Trash emptied");
+    } catch (e) {
+      toast(msg(e));
+    }
+  }
+
+  el("btnTrashRestore").addEventListener("click", () => {
+    const t = S.trash.find((x) => x.id === S.trashPreview);
+    if (t) void restoreTrashItem(t);
+  });
+  el("btnTrashPurge").addEventListener("click", () => {
+    const t = S.trash.find((x) => x.id === S.trashPreview);
+    if (t) void purgeTrashItem(t);
+  });
+
   async function settleConflict(path: string, keepCopy: boolean): Promise<void> {
     await flushSave();
     try {
@@ -1043,7 +1168,7 @@ async function main(): Promise<void> {
       afterDelete((p) => p === path);
       if (S.current && isOpen(survivor)) await reopen(survivor);
       await refresh();
-      toast(keepCopy ? "Kept this version. The old one is in .trash" : "Copy moved to .trash");
+      toast(keepCopy ? "Kept this version. The old one is in the Trash" : "Copy moved to the Trash");
     } catch (e) {
       toast(msg(e));
     }

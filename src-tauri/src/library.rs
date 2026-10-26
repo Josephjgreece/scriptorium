@@ -35,6 +35,23 @@ pub struct SheetInfo {
     pub original: Option<String>,
 }
 
+/// Something in the trash: a sheet, or a whole group with its sheets.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashItem {
+    /// the entry's name inside `.trash`; what the other trash functions take
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub preview: String,
+    pub is_group: bool,
+    /// where it was before it was deleted ("" when unknown)
+    pub original: String,
+    pub deleted: u64,
+    pub sheets: usize,
+    pub words: usize,
+}
+
 #[derive(Serialize, Debug)]
 pub struct SearchHit {
     pub path: String,
@@ -354,7 +371,140 @@ pub fn delete_item(root: &Path, rel: &str) -> Res<()> {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let dest = trash.join(format!("{stamp}-{}", name_of(&src)));
-    fs::rename(&src, &dest).map_err(err)
+    fs::rename(&src, &dest).map_err(err)?;
+    // remember where it came from so it can be put back
+    let _ = fs::write(trash.join(format!("{}.origin", name_of(&dest))), rel_of(root, &src));
+    Ok(())
+}
+
+// ---------- trash ----------
+
+const TRASH: &str = ".trash";
+const ORIGIN_EXT: &str = ".origin";
+
+/// A trash entry by id, refusing anything that isn't a plain entry name inside `.trash`.
+fn trash_entry(root: &Path, id: &str) -> Res<PathBuf> {
+    if id.is_empty() || id.contains(['/', '\\']) || id.starts_with('.') || id.ends_with(ORIGIN_EXT) {
+        return Err("Not in the trash".into());
+    }
+    let p = root.join(TRASH).join(id);
+    if p.exists() {
+        Ok(p)
+    } else {
+        Err("Not in the trash".into())
+    }
+}
+
+fn origin_file(root: &Path, id: &str) -> PathBuf {
+    root.join(TRASH).join(format!("{id}{ORIGIN_EXT}"))
+}
+
+/// "1760000000000-Chapter.md" -> (1760000000, "Chapter.md")
+fn split_trash_id(id: &str) -> (u64, String) {
+    match id.split_once('-') {
+        Some((ms, name)) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => (ms.parse::<u64>().unwrap_or(0) / 1000, name.to_string()),
+        _ => (0, id.to_string()),
+    }
+}
+
+pub fn list_trash(root: &Path) -> Vec<TrashItem> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(root.join(TRASH)) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let id = e.file_name().to_string_lossy().into_owned();
+        if id.starts_with('.') || id.ends_with(ORIGIN_EXT) {
+            continue;
+        }
+        let p = e.path();
+        let (deleted, name) = split_trash_id(&id);
+        let original = fs::read_to_string(origin_file(root, &id)).unwrap_or_default().trim().to_string();
+        if p.is_dir() {
+            let mut files = Vec::new();
+            collect_md(&p, true, &mut files);
+            let words = files.iter().map(|f| fs::read_to_string(f).unwrap_or_default().split_whitespace().count()).sum();
+            out.push(TrashItem {
+                id,
+                title: name.clone(),
+                name,
+                preview: format!("{} {}", files.len(), if files.len() == 1 { "sheet" } else { "sheets" }),
+                is_group: true,
+                original,
+                deleted,
+                sheets: files.len(),
+                words,
+            });
+        } else if is_md(&p) {
+            let text = fs::read_to_string(&p).unwrap_or_default();
+            let (title, preview) = title_and_preview(&text, &stem_of(&p));
+            out.push(TrashItem {
+                id,
+                name,
+                title,
+                preview,
+                is_group: false,
+                original,
+                deleted,
+                sheets: 1,
+                words: text.split_whitespace().count(),
+            });
+        }
+    }
+    out.sort_by(|a, b| b.deleted.cmp(&a.deleted).then_with(|| a.title.cmp(&b.title)));
+    out
+}
+
+pub fn read_trash_sheet(root: &Path, id: &str) -> Res<String> {
+    let p = trash_entry(root, id)?;
+    if !p.is_file() {
+        return Err("That is a group, not a sheet".into());
+    }
+    fs::read_to_string(p).map_err(err)
+}
+
+/// Put an item back where it was deleted from (recreating the group if that's gone). A name
+/// clash gets a number rather than replacing anything. Returns the new library path.
+pub fn restore_trash(root: &Path, id: &str) -> Res<String> {
+    let item = trash_entry(root, id)?;
+    let original = fs::read_to_string(origin_file(root, id)).unwrap_or_default();
+    let original = original.trim();
+    let (parent, name) = match original.rsplit_once('/') {
+        Some((parent, name)) => (parent.to_string(), name.to_string()),
+        None if !original.is_empty() => (String::new(), original.to_string()),
+        None => (String::new(), split_trash_id(id).1),
+    };
+    let dir = resolve(root, &parent)?;
+    fs::create_dir_all(&dir).map_err(err)?;
+    let target = if item.is_dir() {
+        unique_path(&dir, &name, None)
+    } else {
+        unique_path(&dir, name.strip_suffix(".md").unwrap_or(&name), Some("md"))
+    };
+    fs::rename(&item, &target).map_err(err)?;
+    let _ = fs::remove_file(origin_file(root, id));
+    Ok(rel_of(root, &target))
+}
+
+/// Delete one trash entry for good.
+pub fn purge_trash(root: &Path, id: &str) -> Res<()> {
+    let p = trash_entry(root, id)?;
+    if p.is_dir() {
+        fs::remove_dir_all(&p).map_err(err)?;
+    } else {
+        fs::remove_file(&p).map_err(err)?;
+    }
+    let _ = fs::remove_file(origin_file(root, id));
+    Ok(())
+}
+
+pub fn empty_trash(root: &Path) -> Res<usize> {
+    let mut n = 0;
+    for item in list_trash(root) {
+        purge_trash(root, &item.id)?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 pub fn move_item(root: &Path, rel: &str, dest_group: &str) -> Res<String> {
@@ -786,6 +936,96 @@ mod tests {
         fs::create_dir_all(root.join(".trash")).unwrap();
         fs::write(root.join(".trash/x.md"), "x").unwrap();
         assert_eq!(e, stamp(&root));
+    }
+
+    #[test]
+    fn trash_lists_restores_and_purges() {
+        let root = tmp("trash");
+        fs::create_dir_all(root.join("Book")).unwrap();
+        fs::write(root.join("Book/Chapter.md"), "# Chapter\n\nSome words here").unwrap();
+        fs::write(root.join("Note.md"), "# Note\n\nhi").unwrap();
+        delete_item(&root, "Book/Chapter.md").unwrap();
+        delete_item(&root, "Note.md").unwrap();
+
+        let items = list_trash(&root);
+        assert_eq!(items.len(), 2);
+        let ch = items.iter().find(|i| i.title == "Chapter").unwrap();
+        assert_eq!((ch.original.as_str(), ch.is_group, ch.words), ("Book/Chapter.md", false, 5));
+        assert_eq!(read_trash_sheet(&root, &ch.id).unwrap(), "# Chapter\n\nSome words here");
+        assert!(sheets(&root, "", true).unwrap().is_empty(), "trashed sheets are out of the library");
+
+        // back where it came from
+        assert_eq!(restore_trash(&root, &ch.id).unwrap(), "Book/Chapter.md");
+        assert_eq!(read_sheet(&root, "Book/Chapter.md").unwrap(), "# Chapter\n\nSome words here");
+        assert_eq!(list_trash(&root).len(), 1);
+        assert!(!root.join(".trash").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("Chapter")), "origin note is cleaned up");
+
+        // a name clash is numbered, never overwritten
+        let note = list_trash(&root).remove(0);
+        fs::write(root.join("Note.md"), "# Note\n\nnew one").unwrap();
+        assert_eq!(restore_trash(&root, &note.id).unwrap(), "Note 2.md");
+        assert_eq!(read_sheet(&root, "Note.md").unwrap(), "# Note\n\nnew one");
+
+        // forever
+        delete_item(&root, "Note 2.md").unwrap();
+        let id = list_trash(&root).remove(0).id;
+        purge_trash(&root, &id).unwrap();
+        assert!(list_trash(&root).is_empty());
+        assert_eq!(root.join(".trash").read_dir().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn trashed_groups_come_back_whole_and_missing_parents_are_recreated() {
+        let root = tmp("trashgroup");
+        fs::create_dir_all(root.join("A/B")).unwrap();
+        fs::write(root.join("A/B/one.md"), "# one").unwrap();
+        fs::write(root.join("A/B/two.md"), "# two\n\nwords words").unwrap();
+        delete_item(&root, "A/B").unwrap();
+        delete_item(&root, "A").unwrap();
+        let items = list_trash(&root);
+        let b = items.iter().find(|i| i.name == "B").unwrap();
+        assert_eq!((b.is_group, b.sheets, b.words), (true, 2, 6));
+        assert_eq!(b.preview, "2 sheets");
+        // "A" is in the trash too, so restoring B has to recreate A
+        assert_eq!(restore_trash(&root, &b.id).unwrap(), "A/B");
+        assert_eq!(read_sheet(&root, "A/B/two.md").unwrap(), "# two\n\nwords words");
+        assert!(read_trash_sheet(&root, &items.iter().find(|i| i.name == "A").unwrap().id).is_err(), "a group has no text");
+    }
+
+    #[test]
+    fn trash_ids_cannot_escape() {
+        let root = tmp("trashescape");
+        fs::write(root.join("secret.md"), "keep").unwrap();
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        for id in ["../secret.md", "..", ".", "", "a/b", ".hidden", "x.origin"] {
+            assert!(purge_trash(&root, id).is_err(), "{id}");
+            assert!(restore_trash(&root, id).is_err(), "{id}");
+            assert!(read_trash_sheet(&root, id).is_err(), "{id}");
+        }
+        assert_eq!(read_sheet(&root, "secret.md").unwrap(), "keep");
+    }
+
+    #[test]
+    fn empty_trash_only_touches_the_trash() {
+        let root = tmp("emptytrash");
+        fs::write(root.join("keep.md"), "# keep").unwrap();
+        fs::write(root.join("a.md"), "# a").unwrap();
+        fs::write(root.join("b.md"), "# b").unwrap();
+        delete_item(&root, "a.md").unwrap();
+        delete_item(&root, "b.md").unwrap();
+        assert_eq!(empty_trash(&root).unwrap(), 2);
+        assert_eq!(sheets(&root, "", true).unwrap().len(), 1);
+        assert_eq!(empty_trash(&root).unwrap(), 0);
+    }
+
+    #[test]
+    fn items_trashed_before_origins_were_recorded_go_to_the_root() {
+        let root = tmp("legacytrash");
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        fs::write(root.join(".trash/1760000000000-Old.md"), "# Old").unwrap();
+        let item = list_trash(&root).remove(0);
+        assert_eq!((item.original.as_str(), item.deleted), ("", 1_760_000_000));
+        assert_eq!(restore_trash(&root, &item.id).unwrap(), "Old.md");
     }
 
     #[test]

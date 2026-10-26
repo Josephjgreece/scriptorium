@@ -302,6 +302,49 @@ button {
   color: #c47a12;
 }
 
+.trash-bar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  background: var(--material-item);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.trash-bar .grow {
+  flex: 1;
+}
+
+.trash-bar .btn {
+  padding: 4px 12px;
+}
+
+.previewing-trash .trash-bar {
+  display: flex;
+}
+
+.btn.danger {
+  color: #c0392b;
+}
+
+.btn.danger:hover {
+  border-color: #c0392b;
+  color: #c0392b;
+}
+
+.lt-btn.danger {
+  color: #c0392b;
+}
+
+.lt-btn.danger:hover {
+  border-color: #c0392b;
+}
+
+.sheet-item.trash.selected .si-title {
+  color: inherit;
+}
+
 .tree-label {
   padding: 14px 8px 4px;
   font-size: 12.5px;

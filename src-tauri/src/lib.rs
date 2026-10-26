@@ -1,6 +1,6 @@
 mod library;
 
-use library::{Group, SearchHit, SheetInfo};
+use library::{Group, SearchHit, SheetInfo, TrashItem};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -112,6 +112,31 @@ fn move_item(lib: State<Library>, path: String, dest_group: String) -> Result<St
 }
 
 #[tauri::command]
+fn list_trash(lib: State<Library>) -> Vec<TrashItem> {
+    library::list_trash(&lib.root())
+}
+
+#[tauri::command]
+fn read_trash_sheet(lib: State<Library>, id: String) -> Result<String, String> {
+    library::read_trash_sheet(&lib.root(), &id)
+}
+
+#[tauri::command]
+fn restore_trash(lib: State<Library>, id: String) -> Result<String, String> {
+    library::restore_trash(&lib.root(), &id)
+}
+
+#[tauri::command]
+fn purge_trash(lib: State<Library>, id: String) -> Result<(), String> {
+    library::purge_trash(&lib.root(), &id)
+}
+
+#[tauri::command]
+fn empty_trash(lib: State<Library>) -> Result<usize, String> {
+    library::empty_trash(&lib.root())
+}
+
+#[tauri::command]
 fn search(lib: State<Library>, query: String) -> Vec<SearchHit> {
     library::search(&lib.root(), &query)
 }
@@ -176,6 +201,11 @@ pub fn run() {
             rename_item,
             delete_item,
             move_item,
+            list_trash,
+            read_trash_sheet,
+            restore_trash,
+            purge_trash,
+            empty_trash,
             search,
             export_sheet,
             export_text,
