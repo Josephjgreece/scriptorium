@@ -18,6 +18,7 @@ Default location: `Documents/Scriptorium`. Change it from the sidebar, or fix it
 - **Material sheets** (right-click → Mark as material): research and notes, tinted, with a torn-page icon, left out of group word counts and group exports
 - **Glued sheets**: select neighbouring sheets (Ctrl/Cmd or Shift-click), right-click → Glue. They edit as one continuous text but stay separate files; Unglue any time
 - **Filters** (smart folders): saved searches by text, group and recency, listed in the sidebar; search the library and press "Save as filter"
+- **Projects**: a novel or article with its own goal and sections. Start one from a template (Novel, Short story collection, Article or essay) or right-click a group → Make this a project. Sections are Manuscript, Front/back matter or Material; only the manuscript counts toward the word goal, and Export project leaves material out. Set a deadline and it shows the words a day you still need
 - Right-click a group → Export group… joins its sheets in your order, skipping material
 - **Sync-safe**: put the library in any synced folder (Dropbox, iCloud Drive, Proton Drive, ...). Changes made elsewhere appear within seconds, the structure file is merged between devices, and conflicted copies are flagged under Conflicts. Text you typed is never allowed to overwrite a version changed elsewhere: it is kept as a conflicted copy
 - Choose the library folder from the button at the bottom of the sidebar
@@ -58,7 +59,10 @@ Checks: `npm test` (unit), `cd src-tauri && cargo test --lib` (Rust), `npm run t
 ```
 src/main.ts           the UI: panes, menus, saving, shortcuts
 src/editor.ts         CodeMirror setup and the prose styling
-src/meta.ts           order / material / glue / filter model
+src/meta.ts           order / material / glue / filter / project model
+src/projects.ts       project logic: sections, goal, deadline, templates
+src/projectsUi.ts     the new-project and project-settings dialogs
+src/ui.ts             shared UI helpers (modals, menus, icons)
 src/api.ts            bridge to Rust (plus the browser stand-in)
 src-tauri/src/library.rs   all file handling (unit-tested, no Tauri dependency)
 src-tauri/src/lib.rs       thin Tauri command wrappers

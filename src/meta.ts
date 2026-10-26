@@ -12,6 +12,24 @@ export interface Filter {
   group: string;
 }
 
+/**
+ * What a section of a project is for. Manuscript counts toward the goal and is exported.
+ * Matter (front and back matter) is exported but not counted. Material is neither.
+ */
+export type SectionRole = "manuscript" | "matter" | "material";
+
+/** A group flagged as a project: a self-contained work, such as a novel, with its own goal. */
+export interface Project {
+  /** the template it was made from ("" for a plain group made into a project) */
+  template: string;
+  /** words to write; 0 means no goal */
+  goal: number;
+  /** "YYYY-MM-DD", or "" */
+  deadline: string;
+  /** section path -> role; sections not listed are manuscript */
+  sections: Record<string, SectionRole>;
+}
+
 export interface Meta {
   /** group path -> sheet paths in the order the person arranged them */
   order: Record<string, string[]>;
@@ -19,13 +37,15 @@ export interface Meta {
   groups: Record<string, string[]>;
   /** group path -> "icon:colour", the look chosen for it in the sidebar */
   style: Record<string, string>;
+  /** project group path -> its settings */
+  projects: Record<string, Project>;
   material: string[];
   /** each entry is a run of two or more sheets, in reading order, from the same group */
   glue: string[][];
   filters: Filter[];
 }
 
-export const emptyMeta = (): Meta => ({ order: {}, groups: {}, style: {}, material: [], glue: [], filters: [] });
+export const emptyMeta = (): Meta => ({ order: {}, groups: {}, style: {}, projects: {}, material: [], glue: [], filters: [] });
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 
@@ -44,6 +64,15 @@ export function parseMeta(text: string): Meta {
   }
   const style = raw.style as Record<string, unknown> | undefined;
   if (style && typeof style === "object") for (const [k, v] of Object.entries(style)) if (typeof v === "string") m.style[k] = v;
+  const projects = raw.projects as Record<string, Partial<Project>> | undefined;
+  if (projects && typeof projects === "object") {
+    for (const [k, p] of Object.entries(projects)) {
+      if (!p || typeof p !== "object") continue;
+      const sections: Record<string, SectionRole> = {};
+      for (const [sp, role] of Object.entries(p.sections ?? {})) if (role === "manuscript" || role === "matter" || role === "material") sections[sp] = role;
+      m.projects[k] = { template: String(p.template ?? ""), goal: Math.max(0, Math.floor(Number(p.goal) || 0)), deadline: /^\d{4}-\d{2}-\d{2}$/.test(String(p.deadline)) ? String(p.deadline) : "", sections };
+    }
+  }
   m.material = strings(raw.material);
   if (Array.isArray(raw.glue)) m.glue = raw.glue.map(strings).filter((g) => g.length > 1);
   if (Array.isArray(raw.filters)) {
@@ -69,6 +98,9 @@ export function remapMeta(m: Meta, fn: (p: string) => string): void {
     m[field] = moved;
   }
   m.style = Object.fromEntries(Object.entries(m.style).map(([k, v]) => [fn(k), v]));
+  m.projects = Object.fromEntries(
+    Object.entries(m.projects).map(([k, p]) => [fn(k), { ...p, sections: Object.fromEntries(Object.entries(p.sections).map(([sp, r]) => [fn(sp), r])) }]),
+  );
   m.material = m.material.map(fn);
   m.glue = m.glue.map((g) => g.map(fn));
   m.filters = m.filters.map((f) => ({ ...f, group: f.group ? fn(f.group) : "" }));
@@ -84,6 +116,10 @@ export function dropFromMeta(m: Meta, gone: (p: string) => boolean): void {
     }
   }
   for (const k of Object.keys(m.style)) if (gone(k)) delete m.style[k];
+  for (const [k, p] of Object.entries(m.projects)) {
+    if (gone(k)) delete m.projects[k];
+    else for (const sp of Object.keys(p.sections)) if (gone(sp)) delete p.sections[sp];
+  }
   m.material = m.material.filter((p) => !gone(p));
   m.glue = m.glue.map((g) => g.filter((p) => !gone(p)));
   m.filters = m.filters.map((f) => (f.group && gone(f.group) ? { ...f, group: "" } : f));
@@ -98,6 +134,11 @@ export function tidy(m: Meta): void {
       if (kept.length) m[field][k] = kept;
       else delete m[field][k];
     }
+  }
+  // a project's sections are its direct subgroups; a project can't sit inside another project
+  for (const [k, p] of Object.entries(m.projects)) {
+    for (const sp of Object.keys(p.sections)) if (parentOf(sp) !== k) delete p.sections[sp];
+    if (Object.keys(m.projects).some((other) => other !== k && k.startsWith(other + "/"))) delete m.projects[k];
   }
   m.material = [...new Set(m.material)];
   const seen = new Set<string>();
@@ -158,6 +199,17 @@ function mergeSet<T>(base: T[], mine: T[], theirs: T[]): T[] {
   return [...kept, ...mine.filter((x) => !inBase.has(key(x)) && !have.has(key(x)))];
 }
 
+/** Record merge: my change or removal of a key wins, anything I left alone takes their version. */
+function mergeRecord<T>(base: Record<string, T>, mine: Record<string, T>, theirs: Record<string, T>): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const k of new Set([...Object.keys(base), ...Object.keys(mine), ...Object.keys(theirs)])) {
+    const [b, m, t] = [base[k], mine[k], theirs[k]];
+    const pick = b !== undefined && m === undefined ? undefined : !same(m, b) ? m : t;
+    if (pick !== undefined) out[k] = pick;
+  }
+  return out;
+}
+
 /**
  * Three-way merge of the structure file. `base` is the last state both sides agreed on, `mine`
  * is this app's current state, `theirs` is what is on disk now. Changes made on both sides to
@@ -174,11 +226,8 @@ export function mergeMeta(base: Meta, mine: Meta, theirs: Meta): Meta {
       out[field][k] = same(m, b) ? t : same(t, b) ? m : mergeSet(b, m, t);
     }
   }
-  for (const k of new Set([...Object.keys(base.style), ...Object.keys(mine.style), ...Object.keys(theirs.style)])) {
-    const [b, m, t] = [base.style[k], mine.style[k], theirs.style[k]];
-    const pick = b !== undefined && m === undefined ? undefined : m !== b ? m : t; // my change or removal wins, else theirs
-    if (pick !== undefined) out.style[k] = pick;
-  }
+  out.style = mergeRecord(base.style, mine.style, theirs.style);
+  out.projects = mergeRecord(base.projects, mine.projects, theirs.projects);
   out.material = mergeSet(base.material, mine.material, theirs.material);
   out.glue = mergeSet(base.glue, mine.glue, theirs.glue);
   const byId = (fs: Filter[]) => new Map(fs.map((f) => [f.id, f]));

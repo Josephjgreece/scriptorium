@@ -416,6 +416,150 @@ const row = (page, text) => page.locator(".sheet-item", { hasText: text }).first
       await page.close();
     });
 
+    console.log("Projects");
+    const words = (n) => "word ".repeat(n).trim();
+    const bookFiles = {
+      "Book/Chapters/One.md": [`# One\n\n${words(8)}`, 30],
+      "Book/Front/Title.md": [`# Title\n\n${words(3)}`, 20],
+      "Book/Notes/Notes.md": [`# Notes\n\n${words(18)}`, 10],
+      "Plain.md": ["# Plain\n\nunrelated", 5],
+    };
+    const bookMeta = (extra = {}) => ({
+      order: {},
+      groups: { Book: ["Book/Front", "Book/Chapters", "Book/Notes"] },
+      material: [],
+      glue: [],
+      filters: [],
+      projects: { Book: { template: "novel", goal: 100, deadline: "", sections: { "Book/Front": "matter", "Book/Notes": "material" }, ...extra } },
+    });
+    const bookDirs = ["Book", "Book/Chapters", "Book/Front", "Book/Notes"];
+
+    await test("a novel from the template: sections in order, roles shown, first chapter opens", async () => {
+      const { page, disk } = await freshPage(browser, { "Plain.md": ["# Plain\n\nx", 5] });
+      await page.click('button[title="New project"]');
+      await page.fill('.modal input[placeholder="Project name"]', "My Novel");
+      assert.ok((await page.textContent(".tpl.on")).includes("Novel"), "Novel is the default template");
+      await page.click(".modal .btn.primary");
+      await waitFor(() => page.$(".proj-name"), "focused on the project");
+      assert.equal(await page.textContent(".proj-name"), "My Novel");
+      const names = await page.$$eval('.row[data-nav="group"] .name', (e) => e.map((x) => x.textContent));
+      assert.deepEqual(names, ["Front Matter", "Chapters", "Back Matter", "Notes", "Characters"], "template order, not alphabetical");
+      assert.deepEqual(await page.$$eval(".role", (e) => e.map((x) => x.textContent)), ["Matter", "Matter", "Material", "Material"]);
+      const f = await disk.files();
+      for (const p of ["My Novel/Chapters/Chapter 1.md", "My Novel/Front Matter/Title Page.md", "My Novel/Notes/Notes.md"]) assert.ok(p in f, p);
+      assert.deepEqual((await titles(page)), ["Title Page", "Chapter 1", "Acknowledgements", "Notes", "Characters"], "whole project reads front to back");
+      await waitFor(async () => (await page.$eval(".cm-content", (e) => e.innerText)).includes("Chapter 1"), "first chapter opened");
+      assert.equal(await page.$("body.is-material"), null);
+      await row(page, "Notes").click();
+      await waitFor(() => page.$("body.is-material"), "material sections are tinted");
+      assert.ok((await page.textContent("#stRead")).includes("not counted"));
+      assert.equal(await page.$('.row[data-gpath="My Novel/Chapters"] .role'), null, "manuscript has no tag");
+      assert.equal(await page.$('.row[data-nav="group"]:has-text("Plain")'), null);
+      await page.close();
+    });
+
+    await test("goal and totals count the manuscript only; deadline pacing; settings; section types", async () => {
+      const { page, disk } = await freshPage(browser, bookFiles, bookDirs, bookMeta({ deadline: "2099-01-01" }));
+      await page.click('.row[data-nav="project-link"]');
+      await waitFor(() => page.$(".proj-sub"), "project view");
+      assert.equal(await page.textContent(".proj-sub"), "10 of 100 words · 10%", "front matter and material are not counted");
+      assert.ok((await page.textContent(".list-title")).includes("3 sheets · 10 words"));
+      assert.ok((await page.textContent(".goal-text")).includes("days left"), "deadline pacing shown");
+      assert.equal(await page.$eval(".goal-fill", (e) => e.style.width), "10%");
+      assert.equal(await page.$$eval(".sheet-item.material", (e) => e.length), 1, "the Notes sheet is material");
+
+      // a section changed to manuscript counts from then on
+      await page.locator('.row[data-gpath="Book/Notes"]').click({ button: "right" });
+      assert.ok((await page.$$eval(".menu-item", (e) => e.map((x) => x.textContent.trim()))).includes("✓ Material"));
+      await page.click('.menu-item:has-text("Manuscript")');
+      await waitFor(async () => (await page.textContent(".proj-sub")) === "30 of 100 words · 30%", "Notes now counted");
+      assert.equal(await page.$$eval(".sheet-item.material", (e) => e.length), 0);
+      assert.equal((await disk.meta()).projects.Book.sections["Book/Notes"], undefined);
+
+      // settings: goal, name
+      await page.locator(".proj-head").click({ button: "right" });
+      await page.click('.menu-item:has-text("Project settings")');
+      await page.fill('input[aria-label="Word goal"]', "60");
+      await page.selectOption('select[aria-label="Notes section type"]', "material");
+      await page.fill('input[aria-label="Project name"]', "Novel");
+      await page.click(".modal .btn.primary");
+      await waitFor(async () => "Novel/Chapters/One.md" in (await disk.files()), "project folder renamed");
+      await waitFor(async () => (await page.textContent(".proj-sub")) === "10 of 60 words · 16%", "new goal and recount");
+      const m = (await disk.meta()).projects;
+      assert.deepEqual(Object.keys(m), ["Novel"]);
+      assert.equal(m.Novel.goal, 60);
+      assert.deepEqual(m.Novel.sections, { "Novel/Front": "matter", "Novel/Notes": "material" });
+      assert.equal(await page.textContent(".proj-name"), "Novel");
+      await page.close();
+    });
+
+    await test("a group can become a project and stop being one; projects leave the plain tree; focus survives a reload", async () => {
+      const { page, disk } = await freshPage(browser, { "Essay/Draft.md": ["# Draft\n\nwords", 5], "Plain.md": ["# Plain\n\nx", 6] }, ["Essay"]);
+      assert.ok(await page.$('.row[data-nav="group"][data-gpath="Essay"]'), "starts as a plain group");
+      await page.locator('.row[data-gpath="Essay"]').click({ button: "right" });
+      await page.click('.menu-item:has-text("Make this a project")');
+      await waitFor(() => page.$(".proj-name"), "inside the project");
+      assert.ok("Essay" in (await disk.meta()).projects);
+
+      await page.reload();
+      await page.waitForSelector(".proj-name");
+      assert.equal(await page.textContent(".proj-name"), "Essay", "still inside after a reload");
+
+      await page.click(".row.back");
+      await waitFor(() => page.$('.row[data-nav="project-link"]'), "back to the library");
+      assert.equal(await page.$('.row[data-nav="group"][data-gpath="Essay"]'), null, "no longer in the plain tree");
+      assert.equal(await page.textContent('.row[data-nav="project-link"] .name'), "Essay");
+
+      await page.click('.row[data-nav="project-link"]');
+      await page.locator(".proj-head").click({ button: "right" });
+      await page.click('.menu-item:has-text("Stop being a project")');
+      await page.click(".modal .btn.primary");
+      await waitFor(() => page.$('.row[data-nav="group"][data-gpath="Essay"]'), "a plain group again");
+      assert.deepEqual((await disk.meta()).projects ?? {}, {});
+      assert.ok("Essay/Draft.md" in (await disk.files()), "nothing was deleted");
+      await page.close();
+    });
+
+    await test("chapters nobody has arranged read in order, 2 before 10, whatever their dates", async () => {
+      const files = {
+        "Book/Chapters/Chapter 10.md": ["# Chapter 10\n\nz", 100],
+        "Book/Chapters/Chapter 1.md": ["# Chapter 1\n\nz", 5],
+        "Book/Chapters/Chapter 2.md": ["# Chapter 2\n\nz", 50],
+      };
+      const { page } = await freshPage(browser, files, ["Book", "Book/Chapters"], { order: {}, groups: {}, material: [], glue: [], filters: [], projects: { Book: { template: "", goal: 0, deadline: "", sections: {} } } });
+      await page.click('.row[data-nav="project-link"]');
+      await waitFor(async () => (await titles(page)).length === 3, "project view");
+      assert.deepEqual(await titles(page), ["Chapter 1", "Chapter 2", "Chapter 10"]);
+      await page.click('.row[data-gpath="Book/Chapters"]');
+      await waitFor(async () => (await page.textContent(".list-title .lt-name")) === "Chapters", "section view");
+      assert.deepEqual(await titles(page), ["Chapter 1", "Chapter 2", "Chapter 10"]);
+      await page.close();
+    });
+
+    await test("new sheets in a project go to its manuscript; quick open steps into the project; deleting it leaves cleanly", async () => {
+      const { page, disk } = await freshPage(browser, bookFiles, bookDirs, bookMeta());
+      await page.click('.row[data-nav="project-link"]');
+      await waitFor(() => page.$(".proj-name"), "inside");
+      await page.keyboard.press("Control+n");
+      await waitFor(async () => Object.keys(await disk.files()).some((k) => k.startsWith("Book/Chapters/Untitled")), "new sheet in the manuscript section");
+
+      await page.click(".row.back");
+      await waitFor(() => page.$('.row[data-nav="project-link"]'), "out");
+      await page.keyboard.press("Control+o");
+      await page.keyboard.type("title");
+      await page.keyboard.press("Enter");
+      await waitFor(() => page.$(".proj-name"), "quick open went into the project");
+      assert.ok((await page.textContent(".list-title")).includes("Front"));
+
+      await page.locator(".proj-head").click({ button: "right" });
+      await page.click('.menu-item:has-text("Delete project")');
+      await page.click(".modal .btn.primary");
+      await waitFor(() => page.$('.row[data-nav="project-link"]') === null || page.$(".tree-hint"), "left the deleted project");
+      await waitFor(async () => !("Book/Chapters/One.md" in (await disk.files())), "moved to the trash");
+      assert.deepEqual((await disk.meta()).projects ?? {}, {});
+      await page.close();
+    });
+
     console.log("Two devices, one structure file");
     await test("structure changes made on two devices are merged, not overwritten", async () => {
       const files = { "A.md": ["# A\n\ndraft", 40], "Research.md": ["# Research\n\nherons", 30], "Notes.md": ["# Notes\n\nbits", 20] };

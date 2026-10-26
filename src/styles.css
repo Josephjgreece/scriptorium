@@ -497,6 +497,173 @@ body.no-lib .only-collapsed {
   opacity: 0.85;
 }
 
+/* projects */
+.row.back {
+  color: var(--muted);
+}
+
+.row .chev.open-left svg {
+  transform: rotate(180deg);
+}
+
+.proj-head {
+  padding: 8px 10px 10px 14px;
+}
+
+.proj-name {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.proj-sub {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.goal {
+  flex-basis: 100%;
+  margin-top: 2px;
+  font-weight: 400;
+}
+
+.goal-text {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: normal;
+  text-transform: none;
+}
+
+.goal-bar {
+  height: 5px;
+  margin-top: 7px;
+  border-radius: 3px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.goal-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+
+.role {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.role.material {
+  background: var(--material-item);
+}
+
+.list-title {
+  flex-wrap: wrap;
+}
+
+.modal.wide {
+  width: min(560px, 92vw);
+}
+
+.tpl-grid {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.tpl {
+  display: grid;
+  gap: 2px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tpl.on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.tpl-name {
+  font-weight: 600;
+}
+
+.tpl-desc,
+.tpl-secs {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+  margin-bottom: 12px;
+}
+
+.field > span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.field-row {
+  display: flex;
+  gap: 12px;
+}
+
+.modal .field input,
+.modal select {
+  margin-bottom: 0;
+}
+
+.sections h4 {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.sec-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.sec-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal .sec-row select {
+  width: 200px;
+  flex: none;
+}
+
+.modal .hint {
+  margin: 6px 0 14px;
+  font-size: 12px;
+}
+
 .tree-label {
   padding: 14px 8px 4px;
   font-size: 12.5px;

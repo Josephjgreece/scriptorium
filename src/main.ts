@@ -1,217 +1,17 @@
 import "./styles.css";
 import { loadApi, type Api, type Group, type SearchHit, type SheetInfo, type TrashItem } from "./api";
 import { createEditor, makeState } from "./editor";
-import { arrange, arrangeGroups, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
-
-// ------------------------------------------------------------------ small helpers
-
-type Kid = Node | string | null | undefined;
-
-function h<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  props: Record<string, unknown> = {},
-  ...kids: Kid[]
-): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  for (const [k, v] of Object.entries(props)) {
-    if (v == null || v === false) continue;
-    if (k === "class") el.className = String(v);
-    else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2).toLowerCase(), v as EventListener);
-    else el.setAttribute(k, v === true ? "" : String(v));
-  }
-  for (const kid of kids) if (kid != null) el.append(kid);
-  return el;
-}
-
-function el<T extends HTMLElement>(id: string): T {
-  const found = document.getElementById(id);
-  if (!found) throw new Error(`#${id} missing`);
-  return found as T;
-}
-
-function ls(key: string): string | null {
-  try {
-    return localStorage.getItem(key);
-  } catch {
-    return null;
-  }
-}
-function lsSet(key: string, value: string): void {
-  try {
-    localStorage.setItem(key, value);
-  } catch {
-    /* ignore */
-  }
-}
-
-const ICONS: Record<string, string> = {
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  folderPlus: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/>',
-  type: '<path d="M4 7V5h16v2M12 5v14M9 19h6"/>',
-  theme: '<circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M5.6 18.4 7 17M17 7l1.4-1.4"/>',
-  export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
-  focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
-  chev: '<path d="M9 6l6 6-6 6"/>',
-  sidebar: '<rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M9.5 5v14"/>',
-  book: '<path d="M5 4.5h10a3 3 0 0 1 3 3V20H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h10"/>',
-  star: '<path d="M12 4l2.4 5 5.4.7-4 3.8 1 5.4L12 16.3 7.2 18.9l1-5.4-4-3.8 5.4-.7z"/>',
-  heart: '<path d="M12 19s-7-4.4-7-9.5A4 4 0 0 1 12 7a4 4 0 0 1 7 2.5C19 14.6 12 19 12 19z"/>',
-  flag: '<path d="M6 20V5M6 5h11l-2 3.5 2 3.5H6"/>',
-  bookmark: '<path d="M7 4h10v16l-5-3.5L7 20z"/>',
-  bolt: '<path d="M13 3L6 13.5h5L10 21l8-11h-5.5z"/>',
-  bulb: '<path d="M9 17h6M10 20h4M12 4a5.5 5.5 0 0 0-3 10v3h6v-3a5.5 5.5 0 0 0-3-10z"/>',
-  leaf: '<path d="M5 19c0-8 5-13 14-14 0 9-5 14-13 14"/><path d="M5 19c3-4 6-6 9-8"/>',
-  pen: '<path d="M4 20l1-4L16 5l3 3L8 19z"/><path d="M14 7l3 3"/>',
-  trash: '<path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12M10.5 10.5v6M13.5 10.5v6"/>',
-  warn: '<path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.2M12 16.8v.2"/>',
-  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-  funnel: '<path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/>',
-  torn: '<path d="M6 4h12v13l-2 2.2-2-2.2-2 2.2-2-2.2-2 2.2-2-2.2z"/><path d="M9 9h6M9 12.5h4"/>',
-  glue: '<path d="M10 14a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/>',
-  all: '<path d="M7 4h10a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z"/><path d="M9 4v16"/>',
-  clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
-  doc: '<path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10.5a.5.5 0 0 1-.5-.5V4a.5.5 0 0 1 .5-.5z"/><path d="M9 12h6M9 15.5h6M9 8.5h3"/>',
-  inbox: '<path d="M4 13l2.5-7h11L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M4 13h4.5l1 2h5l1-2H20"/>',
-};
-/** Icons and colours a group can be given in the sidebar. */
-const GROUP_ICONS = ["doc", "book", "star", "heart", "flag", "bookmark", "bolt", "bulb", "leaf", "pen"];
-const GROUP_COLORS: Record<string, string> = { blue: "#3b78d8", teal: "#2f93c0", green: "#3a9a5b", orange: "#d9822b", red: "#c8453b", purple: "#8a58c8" };
-
-function icon(name: string): SVGSVGElement {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  svg.innerHTML = ICONS[name];
-  return svg;
-}
-
-const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-
-let toastTimer = 0;
-function toast(text: string): void {
-  const t = el("toast");
-  t.textContent = text;
-  t.classList.add("show");
-  clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => t.classList.remove("show"), 3200);
-}
-
-function whenText(secs: number): string {
-  if (!secs) return "";
-  const d = new Date(secs * 1000);
-  const now = new Date();
-  const day = (x: Date) => Math.floor(new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime() / 86400000);
-  const diff = day(now) - day(d);
-  if (diff === 0) return "Today";
-  if (diff === 1) return "Yesterday";
-  return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: d.getFullYear() === now.getFullYear() ? undefined : "numeric" });
-}
-
-// ------------------------------------------------------------------ modals + menus
-
-function modal(build: (close: (v: string | null) => void, ov: HTMLElement) => HTMLElement): Promise<string | null> {
-  return new Promise((resolve) => {
-    const ov = h("div", { class: "modal-ov" });
-    const close = (v: string | null) => {
-      ov.remove();
-      window.removeEventListener("keydown", onKey, true);
-      resolve(v);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        close(null);
-      }
-    };
-    ov.addEventListener("mousedown", (e) => {
-      if (e.target === ov) close(null);
-    });
-    ov.append(build(close, ov));
-    document.body.append(ov);
-    window.addEventListener("keydown", onKey, true);
-  });
-}
-
-function askText(title: string, initial = "", okLabel = "OK"): Promise<string | null> {
-  return modal((close) => {
-    const input = h("input", { type: "text", value: initial, spellcheck: "false" });
-    const ok = () => {
-      const v = input.value.trim();
-      close(v || null);
-    };
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") ok();
-    });
-    queueMicrotask(() => {
-      input.focus();
-      input.select();
-    });
-    return h(
-      "div",
-      { class: "modal" },
-      h("h3", {}, title),
-      input,
-      h("div", { class: "actions" }, h("button", { class: "btn", onclick: () => close(null) }, "Cancel"), h("button", { class: "btn primary", onclick: ok }, okLabel)),
-    );
-  });
-}
-
-async function askConfirm(title: string, body: string, okLabel: string): Promise<boolean> {
-  const r = await modal((close) => {
-    const okBtn = h("button", { class: "btn primary", onclick: () => close("yes") }, okLabel);
-    queueMicrotask(() => okBtn.focus());
-    return h("div", { class: "modal" }, h("h3", {}, title), h("p", {}, body), h("div", { class: "actions" }, h("button", { class: "btn", onclick: () => close(null) }, "Cancel"), okBtn));
-  });
-  return r === "yes";
-}
-
-interface MenuItem {
-  label: string;
-  run: () => void;
-  danger?: boolean;
-  sep?: boolean;
-}
-function showMenu(x: number, y: number, items: MenuItem[]): void {
-  document.querySelector(".menu")?.remove();
-  const menu = h("div", { class: "menu", role: "menu" });
-  for (const it of items) {
-    if (it.sep) menu.append(h("div", { class: "menu-sep" }));
-    menu.append(
-      h("div", {
-        class: "menu-item" + (it.danger ? " danger" : ""),
-        role: "menuitem",
-        onclick: () => {
-          menu.remove();
-          it.run();
-        },
-      }, it.label),
-    );
-  }
-  document.body.append(menu);
-  const r = menu.getBoundingClientRect();
-  menu.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
-  menu.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
-  const away = (e: Event) => {
-    if (!menu.contains(e.target as Node)) {
-      menu.remove();
-      window.removeEventListener("mousedown", away, true);
-    }
-  };
-  window.addEventListener("mousedown", away, true);
-  window.addEventListener("keydown", function esc(e) {
-    if (e.key === "Escape") {
-      menu.remove();
-      window.removeEventListener("keydown", esc);
-    }
-  });
-}
+import { countsTowardGoal, deadlineText, goalText, isMaterialPath, orderedSheets, progress, projectOf, projectSheets, roleOf, TEMPLATES } from "./projects";
+import { askNewProject, askProjectSettings, ROLE_LABEL } from "./projectsUi";
+import { askConfirm, askText, el, GROUP_COLORS, GROUP_ICONS, h, icon, ls, lsSet, modal, msg, showMenu, toast, whenText, type MenuItem } from "./ui";
+import { arrangeGroups, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta, type SectionRole } from "./meta";
 
 // ------------------------------------------------------------------ app
 
 async function main(): Promise<void> {
   const api: Api = await loadApi();
 
-  type View = { kind: "all" } | { kind: "recent" } | { kind: "conflicts" } | { kind: "trash" } | { kind: "filter"; id: string } | { kind: "group"; path: string };
+  type View = { kind: "all" } | { kind: "recent" } | { kind: "conflicts" } | { kind: "trash" } | { kind: "filter"; id: string } | { kind: "project"; path: string } | { kind: "group"; path: string };
   const S = {
     tree: null as Group | null,
     view: { kind: "group", path: "" } as View,
@@ -237,6 +37,8 @@ async function main(): Promise<void> {
     typewriter: ls("typewriter") === "1",
     theme: ls("theme") ?? "auto",
     noLib: ls("noLib") === "1",
+    /** the project the sidebar is focused on (see "Projects"), or null for the whole library */
+    project: (ls("project") || null) as string | null,
     collapsed: new Set<string>(safeJson(ls("collapsed"))),
   };
 
@@ -350,7 +152,7 @@ async function main(): Promise<void> {
       })
       .catch((e) => toast(`Couldn't save structure: ${msg(e)}`));
   }
-  const isMaterial = (path: string | null): boolean => !!path && S.meta.material.includes(path);
+  const isMaterial = (path: string | null): boolean => !!path && isMaterialPath(S.meta, path);
   const isOpen = (path: string): boolean => path === S.current || !!S.glue?.includes(path);
 
   function applyMaterialClass(): void {
@@ -374,7 +176,11 @@ async function main(): Promise<void> {
     if (S.glue) S.glue = S.glue.map(fn);
     S.sel = new Set([...S.sel].map(fn));
     S.anchor = S.anchor ? fn(S.anchor) : null;
-    if (S.view.kind === "group") S.view = { kind: "group", path: fn(S.view.path) };
+    if (S.view.kind === "group" || S.view.kind === "project") S.view = { kind: S.view.kind, path: fn(S.view.path) };
+    if (S.project) {
+      S.project = fn(S.project);
+      lsSet("project", S.project);
+    }
     S.collapsed = new Set([...S.collapsed].map(fn));
     lsSet("collapsed", JSON.stringify([...S.collapsed]));
     refreshCrumb();
@@ -521,6 +327,11 @@ async function main(): Promise<void> {
       S.tree = await api.listTree();
       S.all = await api.listSheets("", true);
       S.trash = await api.listTrash();
+      if (S.project && (!S.meta.projects[S.project] || !findGroup(S.tree, S.project))) {
+        S.project = null; // the project was removed or renamed outside the app
+        lsSet("project", "");
+        if (S.view.kind === "project") S.view = { kind: "group", path: "" };
+      }
       S.sheets = await loadSheets();
     } catch (e) {
       // The group we were looking at may be gone; fall back to the root.
@@ -541,7 +352,7 @@ async function main(): Promise<void> {
   const RECENT_SECS = 7 * 86400;
   async function loadSheets(): Promise<SheetInfo[]> {
     const v = S.view;
-    if (v.kind === "group") return arrange(S.meta, v.path, await api.listSheets(v.path, false));
+    if (v.kind === "group") return orderedSheets(S.meta, v.path, await api.listSheets(v.path, false));
     if (v.kind === "all") return S.all;
     if (v.kind === "conflicts") return S.all.filter((x) => x.conflict);
     if (v.kind === "recent") {
@@ -549,6 +360,10 @@ async function main(): Promise<void> {
       return S.all.filter((x) => x.modified >= since);
     }
     if (v.kind === "trash") return []; // the Trash has its own list
+    if (v.kind === "project") {
+      const node = findGroup(S.tree, v.path);
+      return node ? projectSheets(S.meta, node, S.all) : [];
+    }
     // a saved filter: text, group and recency, all of which must match
     const f = S.meta.filters.find((x) => x.id === v.id);
     if (!f) return [];
@@ -561,12 +376,103 @@ async function main(): Promise<void> {
     return found;
   }
 
-  const viewGroupPath = (): string => (S.view.kind === "group" ? S.view.path : "");
+  /** In a project view, new sheets go to its first manuscript section (or the project itself). */
+  function projectTarget(path: string): string {
+    const node = findGroup(S.tree, path);
+    const section = arrangeGroups(S.meta, path, node?.children ?? []).find((c) => roleOf(S.meta, c.path) === "manuscript");
+    return section?.path ?? path;
+  }
+  const viewGroupPath = (): string => (S.view.kind === "group" ? S.view.path : S.view.kind === "project" ? projectTarget(S.view.path) : "");
 
   // -------- library tree
+  function rowFor(g: Group, depth: number, label: string, ico: string, color = ""): HTMLElement {
+    const isRoot = g.path === "";
+    const open = !S.collapsed.has(g.path);
+    const active = S.view.kind === "group" && S.view.path === g.path;
+    const chev = h("span", { class: "chev" + (open ? " open" : "") });
+    if (!isRoot && g.children.length) {
+      chev.append(icon("chev"));
+      chev.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleCollapsed(g.path);
+      });
+    }
+    const ic = icon(ico);
+    if (color) ic.style.stroke = color;
+    const row = h(
+      "div",
+      {
+        class: "row" + (active ? " active" : ""),
+        style: `padding-left:${8 + depth * 16}px`,
+        "data-nav": "group",
+        "data-gpath": g.path,
+        "data-kids": g.children.length ? "1" : null,
+        draggable: isRoot ? null : "true",
+        onclick: () => void selectView({ kind: "group", path: g.path }),
+      },
+      chev,
+      ic,
+      h("span", { class: "name" }, label),
+    );
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, groupMenu(g));
+    });
+    row.addEventListener("dragstart", (e) => {
+      dragGroup = g.path;
+      e.dataTransfer?.setData("text/x-scriptorium-group", g.path);
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    });
+    // dropping a group: near the top or bottom edge puts it before or after this one,
+    // in the middle moves it inside. Dropping sheets always moves them inside.
+    const zoneOf = (e: DragEvent): "before" | "after" | "into" => {
+      if (isRoot) return "into";
+      const r = row.getBoundingClientRect();
+      const f = (e.clientY - r.top) / r.height;
+      return f < 0.28 ? "before" : f > 0.72 ? "after" : "into";
+    };
+    const clearMarks = () => row.classList.remove("drop", "drop-above", "drop-below");
+    row.addEventListener("dragover", (e) => {
+      const types = e.dataTransfer?.types ?? [];
+      if (types.includes("text/x-scriptorium-group")) {
+        if (!dragGroup || dragGroup === g.path || g.path.startsWith(dragGroup + "/")) return;
+        e.preventDefault();
+        const z = zoneOf(e);
+        clearMarks();
+        row.classList.add(z === "before" ? "drop-above" : z === "after" ? "drop-below" : "drop");
+      } else if (types.includes("text/x-scriptorium-paths") || types.includes("text/x-scriptorium")) {
+        e.preventDefault();
+        row.classList.add("drop");
+      }
+    });
+    row.addEventListener("dragleave", clearMarks);
+    row.addEventListener("dragend", () => {
+      dragGroup = null;
+      treeEl.querySelectorAll(".drop, .drop-above, .drop-below").forEach((n) => n.classList.remove("drop", "drop-above", "drop-below"));
+    });
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      clearMarks();
+      if (e.dataTransfer?.types.includes("text/x-scriptorium-group")) {
+        if (dragGroup) void moveGroup(dragGroup, g, zoneOf(e));
+        dragGroup = null;
+        return;
+      }
+      const raw = e.dataTransfer?.getData("text/x-scriptorium-paths");
+      const src = e.dataTransfer?.getData("text/x-scriptorium");
+      const paths = raw ? (JSON.parse(raw) as string[]) : src ? [src] : [];
+      if (paths.length) void moveTo(paths, g.path);
+    });
+    return row;
+  }
+
   function renderTree(): void {
     treeEl.replaceChildren();
     if (!S.tree) return;
+    if (S.project && findGroup(S.tree, S.project)) {
+      renderProjectTree();
+      return;
+    }
     const smartRow = (kind: "all" | "recent" | "conflicts" | "trash", ico: string, label: string, count = 0): HTMLElement =>
       h(
         "div",
@@ -609,90 +515,22 @@ async function main(): Promise<void> {
       treeEl.append(row);
     }
 
-    const rowFor = (g: Group, depth: number, label: string, ico: string, color = ""): HTMLElement => {
-      const isRoot = g.path === "";
-      const open = !S.collapsed.has(g.path);
-      const active = S.view.kind === "group" && S.view.path === g.path;
-      const chev = h("span", { class: "chev" + (open ? " open" : "") });
-      if (!isRoot && g.children.length) {
-        chev.append(icon("chev"));
-        chev.addEventListener("click", (e) => {
-          e.stopPropagation();
-          toggleCollapsed(g.path);
-        });
-      }
-      const ic = icon(ico);
-      if (color) ic.style.stroke = color;
-      const row = h(
+    treeEl.append(
+      h(
         "div",
-        {
-          class: "row" + (active ? " active" : ""),
-          style: `padding-left:${8 + depth * 16}px`,
-          "data-nav": "group",
-          "data-gpath": g.path,
-          "data-kids": g.children.length ? "1" : null,
-          draggable: isRoot ? null : "true",
-          onclick: () => void selectView({ kind: "group", path: g.path }),
-        },
-        chev,
-        ic,
-        h("span", { class: "name" }, label),
-      );
-      row.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        showMenu(e.clientX, e.clientY, groupMenu(g));
-      });
-      row.addEventListener("dragstart", (e) => {
-        dragGroup = g.path;
-        e.dataTransfer?.setData("text/x-scriptorium-group", g.path);
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-      });
-      // dropping a group: near the top or bottom edge puts it before or after this one,
-      // in the middle moves it inside. Dropping sheets always moves them inside.
-      const zoneOf = (e: DragEvent): "before" | "after" | "into" => {
-        if (isRoot) return "into";
-        const r = row.getBoundingClientRect();
-        const f = (e.clientY - r.top) / r.height;
-        return f < 0.28 ? "before" : f > 0.72 ? "after" : "into";
-      };
-      const clearMarks = () => row.classList.remove("drop", "drop-above", "drop-below");
-      row.addEventListener("dragover", (e) => {
-        const types = e.dataTransfer?.types ?? [];
-        if (types.includes("text/x-scriptorium-group")) {
-          if (!dragGroup || dragGroup === g.path || g.path.startsWith(dragGroup + "/")) return;
-          e.preventDefault();
-          const z = zoneOf(e);
-          clearMarks();
-          row.classList.add(z === "before" ? "drop-above" : z === "after" ? "drop-below" : "drop");
-        } else if (types.includes("text/x-scriptorium-paths") || types.includes("text/x-scriptorium")) {
-          e.preventDefault();
-          row.classList.add("drop");
-        }
-      });
-      row.addEventListener("dragleave", clearMarks);
-      row.addEventListener("dragend", () => {
-        dragGroup = null;
-        treeEl.querySelectorAll(".drop, .drop-above, .drop-below").forEach((n) => n.classList.remove("drop", "drop-above", "drop-below"));
-      });
-      row.addEventListener("drop", (e) => {
-        e.preventDefault();
-        clearMarks();
-        if (e.dataTransfer?.types.includes("text/x-scriptorium-group")) {
-          if (dragGroup) void moveGroup(dragGroup, g, zoneOf(e));
-          dragGroup = null;
-          return;
-        }
-        const raw = e.dataTransfer?.getData("text/x-scriptorium-paths");
-        const src = e.dataTransfer?.getData("text/x-scriptorium");
-        const paths = raw ? (JSON.parse(raw) as string[]) : src ? [src] : [];
-        if (paths.length) void moveTo(paths, g.path);
-      });
-      return row;
-    };
+        { class: "tree-label with-btn" },
+        h("span", {}, "Projects"),
+        h("button", { class: "icon-btn mini", title: "New project", "aria-label": "New project", onclick: () => void createProject() }, icon("plus")),
+      ),
+    );
+    const projects = Object.keys(S.meta.projects).filter((p) => findGroup(S.tree, p));
+    if (!projects.length) treeEl.append(h("div", { class: "tree-hint" }, "A novel, an article: a work with its own goal and sections."));
+    for (const path of projects) treeEl.append(projectRow(path));
 
     // Loose sheets in the library folder live in the Inbox, like Ulysses.
     treeEl.append(h("div", { class: "tree-label" }, "On this computer"), rowFor(S.tree, 0, "Inbox", "inbox"));
     const addGroup = (g: Group, depth: number): void => {
+      if (S.meta.projects[g.path]) return; // projects live under Projects
       const [ico, colour] = (S.meta.style[g.path] ?? "").split(":");
       treeEl.append(rowFor(g, depth, g.name, GROUP_ICONS.includes(ico) ? ico : "doc", GROUP_COLORS[colour] ?? ""));
       if (!S.collapsed.has(g.path)) for (const c of arrangeGroups(S.meta, g.path, g.children)) addGroup(c, depth + 1);
@@ -768,13 +606,224 @@ async function main(): Promise<void> {
     renderTree();
   }
 
+  // -------- projects
+  /** Words that count toward a project's goal: manuscript only, never material or front/back matter. */
+  const projectWords = (path: string): number => S.all.filter((x) => x.path.startsWith(path + "/") && countsTowardGoal(S.meta, x.path)).reduce((n, x) => n + x.words, 0);
+  const nameOf = (path: string): string => path.split("/").pop() ?? path;
+
+  function projectRow(path: string): HTMLElement {
+    const proj = S.meta.projects[path];
+    const [ico, colour] = (S.meta.style[path] ?? "").split(":");
+    const ic = icon(GROUP_ICONS.includes(ico) ? ico : "book");
+    ic.style.stroke = GROUP_COLORS[colour] ?? GROUP_COLORS.blue;
+    const pr = progress(proj, projectWords(path));
+    const row = h(
+      "div",
+      { class: "row", style: "padding-left:8px", "data-nav": "project-link", "data-ppath": path, onclick: () => void enterProject(path) },
+      h("span", { class: "chev" }),
+      ic,
+      h("span", { class: "name" }, nameOf(path)),
+      pr.goal ? h("span", { class: "count" }, `${pr.percent}%`) : null,
+    );
+    row.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, projectMenu(path));
+    });
+    return row;
+  }
+
+  /** The sidebar while you are inside a project: just that project, with a way back. */
+  function renderProjectTree(): void {
+    const path = S.project!;
+    const node = findGroup(S.tree, path)!;
+    const proj = S.meta.projects[path];
+    const pr = progress(proj, projectWords(path));
+    const back = h("div", { class: "row back", style: "padding-left:8px", onclick: () => void leaveProject() }, h("span", { class: "chev open-left" }, icon("chev")), h("span", { class: "name" }, "Library"));
+    const head = h(
+      "div",
+      { class: "proj-head" },
+      h("div", { class: "proj-name" }, nameOf(path)),
+      pr.goal ? h("div", { class: "goal-bar" }, h("div", { class: "goal-fill", style: `width:${pr.percent}%` })) : null,
+      h("div", { class: "proj-sub" }, goalText(pr)),
+      deadlineText(pr) ? h("div", { class: "proj-sub" }, deadlineText(pr)) : null,
+    );
+    head.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMenu(e.clientX, e.clientY, projectMenu(path));
+    });
+    const whole = h(
+      "div",
+      { class: "row" + (S.view.kind === "project" ? " active" : ""), style: "padding-left:8px", "data-nav": "project", onclick: () => void selectView({ kind: "project", path }) },
+      h("span", { class: "chev" }),
+      icon("all"),
+      h("span", { class: "name" }, "Whole project"),
+    );
+    treeEl.append(back, head, whole);
+    if (node.count > 0) {
+      treeEl.append(
+        h(
+          "div",
+          { class: "row" + (S.view.kind === "group" && S.view.path === path ? " active" : ""), style: "padding-left:8px", "data-nav": "group", "data-gpath": path, onclick: () => void selectView({ kind: "group", path }) },
+          h("span", { class: "chev" }),
+          icon("doc"),
+          h("span", { class: "name" }, "Loose sheets"),
+        ),
+      );
+    }
+    treeEl.append(
+      h(
+        "div",
+        { class: "tree-label with-btn" },
+        h("span", {}, "Sections"),
+        h("button", { class: "icon-btn mini", title: "New section", "aria-label": "New section", onclick: () => void newGroup(path) }, icon("plus")),
+      ),
+    );
+    if (!node.children.length) treeEl.append(h("div", { class: "tree-hint" }, "Add a group for each part: chapters, notes, research."));
+    const addSection = (g: Group, depth: number): void => {
+      const [ico, colour] = (S.meta.style[g.path] ?? "").split(":");
+      const row = rowFor(g, depth, g.name, GROUP_ICONS.includes(ico) ? ico : "doc", GROUP_COLORS[colour] ?? "");
+      const role = roleOf(S.meta, g.path);
+      if (depth === 0 && role !== "manuscript") row.querySelector(".name")?.after(h("span", { class: "role " + role }, role === "matter" ? "Matter" : "Material"));
+      treeEl.append(row);
+      if (!S.collapsed.has(g.path)) for (const c of arrangeGroups(S.meta, g.path, g.children)) addSection(c, depth + 1);
+    };
+    for (const c of arrangeGroups(S.meta, path, node.children)) addSection(c, 0);
+    treeEl.querySelector(".row.active")?.scrollIntoView({ block: "nearest" });
+  }
+
+  async function enterProject(path: string): Promise<void> {
+    S.project = path;
+    lsSet("project", path);
+    await selectView({ kind: "project", path });
+  }
+
+  async function leaveProject(): Promise<void> {
+    S.project = null;
+    lsSet("project", "");
+    await selectView({ kind: "group", path: "" });
+  }
+
+  async function createProject(): Promise<void> {
+    const r = await askNewProject();
+    if (!r) return;
+    const tpl = TEMPLATES.find((t) => t.id === r.template) ?? TEMPLATES[TEMPLATES.length - 1];
+    await flushSave();
+    try {
+      const path = await api.createGroup("", r.name);
+      const sections: Record<string, SectionRole> = {};
+      let first = "";
+      for (const sec of tpl.sections) {
+        const sp = await api.createGroup(path, sec.name);
+        sections[sp] = sec.role;
+        const made: string[] = [];
+        for (const body of sec.sheets) {
+          const np = await api.writeSheet(await api.createSheet(sp), body);
+          made.push(np);
+          if (!first && sec.role === "manuscript") first = np;
+        }
+        if (made.length > 1) S.meta.order[sp] = made;
+      }
+      S.meta.groups[path] = Object.keys(sections); // sections stay in the template's order
+      S.meta.projects[path] = { template: tpl.id, goal: 0, deadline: "", sections };
+      persistMeta();
+      await enterProject(path);
+      if (first) await openSheet(first);
+      toast(`Created “${r.name}”`);
+    } catch (e) {
+      toast(msg(e));
+      await refresh();
+    }
+  }
+
+  async function makeProject(g: Group): Promise<void> {
+    S.meta.projects[g.path] = { template: "", goal: 0, deadline: "", sections: {} };
+    persistMeta();
+    await enterProject(g.path);
+    toast(`“${g.name}” is now a project. Open its settings to set a goal and section types.`);
+  }
+
+  async function stopProject(path: string): Promise<void> {
+    const ok = await askConfirm(`Stop “${nameOf(path)}” being a project?`, "Its sheets and groups stay exactly as they are. Only the goal, deadline and section types are forgotten.", "Stop being a project");
+    if (!ok) return;
+    delete S.meta.projects[path];
+    persistMeta();
+    if (S.project === path) await leaveProject();
+    else await refresh();
+  }
+
+  async function projectSettings(path: string): Promise<void> {
+    const proj = S.meta.projects[path];
+    const node = findGroup(S.tree, path);
+    if (!proj || !node) return;
+    const r = await askProjectSettings({
+      name: nameOf(path),
+      goal: proj.goal,
+      deadline: proj.deadline,
+      sections: arrangeGroups(S.meta, path, node.children).map((c) => ({ path: c.path, name: c.name, role: proj.sections[c.path] ?? "manuscript" })),
+    });
+    if (!r) return;
+    await flushSave();
+    try {
+      const sections: Record<string, SectionRole> = {};
+      for (const [sp, role] of Object.entries(r.roles)) if (role !== "manuscript") sections[sp] = role;
+      let at = path;
+      if (r.name !== nameOf(path)) {
+        at = await api.renameItem(path, r.name);
+        const old = path;
+        applyRemap((p) => (p === old || p.startsWith(old + "/") ? at + p.slice(old.length) : p));
+        for (const sp of Object.keys(sections)) {
+          const moved = at + sp.slice(old.length);
+          sections[moved] = sections[sp];
+          if (moved !== sp) delete sections[sp];
+        }
+      }
+      S.meta.projects[at] = { ...S.meta.projects[at], goal: r.goal, deadline: r.deadline, sections };
+      persistMeta();
+      applyMaterialClass();
+      await refresh();
+    } catch (e) {
+      toast(msg(e));
+      await refresh();
+    }
+  }
+
+  async function setSectionRole(g: Group, role: SectionRole): Promise<void> {
+    const proj = S.meta.projects[parentOf(g.path)];
+    if (!proj) return;
+    if (role === "manuscript") delete proj.sections[g.path];
+    else proj.sections[g.path] = role;
+    persistMeta();
+    applyMaterialClass();
+    await refresh();
+  }
+
+  function projectMenu(path: string): MenuItem[] {
+    const g = findGroup(S.tree, path);
+    return [
+      { label: "Project settings…", run: () => void projectSettings(path) },
+      { label: "New sheet", run: () => void newSheetIn(projectTarget(path)) },
+      { label: "New section…", run: () => void newGroup(path) },
+      { label: "Export project…", run: () => g && void exportGroup(g), sep: true },
+      { label: "Stop being a project…", run: () => void stopProject(path) },
+      { label: "Delete project…", run: () => g && void deleteGroup(g), danger: true, sep: true },
+    ];
+  }
+
   function groupMenu(g: Group): MenuItem[] {
+    const inProject = projectOf(S.meta, g.path);
+    const isProject = !!S.meta.projects[g.path];
+    if (isProject) return projectMenu(g.path);
     const items: MenuItem[] = [
       { label: "New sheet here", run: () => void newSheetIn(g.path) },
       { label: "New group inside…", run: () => void newGroup(g.path) },
       { label: "Export group…", run: () => void exportGroup(g), sep: true },
     ];
+    if (inProject !== null && parentOf(g.path) === inProject) {
+      const role = roleOf(S.meta, g.path);
+      for (const r of Object.keys(ROLE_LABEL) as SectionRole[]) items.push({ label: `${role === r ? "✓ " : "    "}${ROLE_LABEL[r]}`, run: () => void setSectionRole(g, r), sep: r === "manuscript" });
+    }
     if (g.path !== "") {
+      if (inProject === null) items.push({ label: "Make this a project", run: () => void makeProject(g), sep: true });
       items.push(
         { label: "Rename…", run: () => void renameGroup(g), sep: true },
         { label: "Icon & colour…", run: () => void askGroupStyle(g) },
@@ -854,12 +903,25 @@ async function main(): Promise<void> {
       return;
     }
     const name =
-      v.kind === "all" ? "All" : v.kind === "recent" ? "Last 7 Days" : v.kind === "conflicts" ? "Conflicts" : v.kind === "filter" ? (S.meta.filters.find((f) => f.id === v.id)?.name ?? "Filter") : v.path === "" ? "Inbox" : (v.path.split("/").pop() ?? "");
-    const words = S.sheets.filter((x) => !isMaterial(x.path)).reduce((n, x) => n + x.words, 0);
+      v.kind === "all" ? "All" : v.kind === "recent" ? "Last 7 Days" : v.kind === "conflicts" ? "Conflicts" : v.kind === "filter" ? (S.meta.filters.find((f) => f.id === v.id)?.name ?? "Filter") : v.kind === "project" ? nameOf(v.path) : v.path === "" ? "Inbox" : (v.path.split("/").pop() ?? "");
+    const words = S.sheets.filter((x) => countsTowardGoal(S.meta, x.path)).reduce((n, x) => n + x.words, 0);
     listTitle.append(
       h("span", { class: "lt-name" }, name),
-      h("span", { class: "lt-count", title: "Material sheets are not counted" }, `${plural(S.sheets.length, "sheet")} · ${plural(words, "word")}`),
+      h("span", { class: "lt-count", title: "Material sheets and front/back matter are not counted" }, `${plural(S.sheets.length, "sheet")} · ${plural(words, "word")}`),
     );
+    const projectPath = v.kind === "project" ? v.path : "";
+    const proj = projectPath ? S.meta.projects[projectPath] : undefined;
+    if (proj && (proj.goal || proj.deadline)) {
+      const pr = progress(proj, projectWords(projectPath));
+      listTitle.append(
+        h(
+          "div",
+          { class: "goal" },
+          pr.goal ? h("div", { class: "goal-bar" }, h("div", { class: "goal-fill", style: `width:${pr.percent}%` })) : null,
+          h("div", { class: "goal-text" }, [goalText(pr), deadlineText(pr)].filter(Boolean).join(" · ")),
+        ),
+      );
+    }
     units = unitsOf(S.sheets);
     if (!units.length) {
       sheetsEl.append(h("div", { class: "none" }, v.kind === "recent" ? "Nothing written in the last 7 days." : v.kind === "conflicts" ? "No conflicts. Everything is in agreement." : v.kind === "filter" ? "No sheets match this filter." : "No sheets here yet."));
@@ -984,7 +1046,8 @@ async function main(): Promise<void> {
   function unitMenu(u: Unit): MenuItem[] {
     const targets = S.sel.has(u.key) && S.sel.size > 1 ? units.filter((x) => S.sel.has(x.key)) : [u];
     const paths = targets.flatMap((t) => t.paths);
-    const allMaterial = paths.every((p) => isMaterial(p));
+    const allMaterial = paths.every((p) => S.meta.material.includes(p));
+    const fromSection = paths.every((p) => roleOf(S.meta, p) === "material");
     const items: MenuItem[] = [{ label: "Open", run: () => void openSheet(u.paths[0]) }];
     const copy = targets.length === 1 && u.sheets[0].conflict ? u.sheets[0] : null;
     if (copy?.original) {
@@ -997,7 +1060,7 @@ async function main(): Promise<void> {
     if (canGlue(targets)) items.push({ label: `Glue ${paths.length} sheets`, run: () => void glueUnits(targets) });
     if (targets.length === 1 && u.paths.length > 1) items.push({ label: "Unglue sheets", run: () => void unglue(u) });
     if (targets.length === 1 && u.paths.length === 1) items.push({ label: "Rename file…", run: () => void renameSheet(u.paths[0]) });
-    items.push({ label: allMaterial ? "Remove material mark" : "Mark as material", run: () => void setMaterial(paths, !allMaterial) });
+    if (!fromSection) items.push({ label: allMaterial ? "Remove material mark" : "Mark as material", run: () => void setMaterial(paths, !allMaterial) });
     if (targets.length === 1) items.push({ label: "Export…", run: () => void exportSheet(u.paths[0]) });
     items.push(
       { label: "Move to Inbox", run: () => void moveTo(paths, "") },
@@ -1113,7 +1176,7 @@ async function main(): Promise<void> {
       S.hits = null;
       const p = await api.createSheet(group);
       // a new sheet goes after the sheet you are on (or the end of the group), keeping the rest as is
-      const others = arrange(S.meta, group, await api.listSheets(group, false)).map((x) => x.path).filter((x) => x !== p);
+      const others = orderedSheets(S.meta, group, await api.listSheets(group, false)).map((x) => x.path).filter((x) => x !== p);
       const here = S.current ? (S.glue ?? [S.current]).at(-1)! : null;
       const at = here ? others.indexOf(here) : -1;
       S.meta.order[group] = at >= 0 ? [...others.slice(0, at + 1), p, ...others.slice(at + 1)] : [...others, p];
@@ -1172,7 +1235,11 @@ async function main(): Promise<void> {
     dropFromMeta(S.meta, gone);
     persistMeta();
     S.sel = new Set([...S.sel].filter((k) => !gone(k)));
-    if (S.view.kind === "group" && gone(S.view.path)) S.view = { kind: "group", path: "" };
+    if ((S.view.kind === "group" || S.view.kind === "project") && gone(S.view.path)) S.view = { kind: "group", path: "" };
+    if (S.project && gone(S.project)) {
+      S.project = null;
+      lsSet("project", "");
+    }
     if (S.current && (gone(S.current) || S.glue?.some(gone))) closeEditor();
   }
 
@@ -1359,7 +1426,7 @@ async function main(): Promise<void> {
     try {
       const parts: string[] = [];
       const walk = async (node: Group): Promise<void> => {
-        for (const x of arrange(S.meta, node.path, await api.listSheets(node.path, false))) {
+        for (const x of orderedSheets(S.meta, node.path, await api.listSheets(node.path, false))) {
           if (!isMaterial(x.path)) parts.push(await api.readSheet(x.path));
         }
         for (const c of node.children) await walk(c);
@@ -1525,6 +1592,12 @@ async function main(): Promise<void> {
     searchEl.value = "";
     S.hits = null;
     for (let d = parentOf(path); d; d = parentOf(d)) S.collapsed.delete(d);
+    // a sheet inside a project opens within that project, anything else leaves it
+    const proj = projectOf(S.meta, path);
+    if (S.project !== proj) {
+      S.project = proj;
+      lsSet("project", proj ?? "");
+    }
     if (S.view.kind !== "group" || S.view.path !== parentOf(path)) S.view = { kind: "group", path: parentOf(path) };
     await refresh();
     await openSheet(path);
@@ -1596,7 +1669,7 @@ async function main(): Promise<void> {
   // Sidebar: arrows move through the rows (opening each), Left/Right fold groups, Enter jumps to the list.
   treeEl.addEventListener("keydown", (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
-    const rows = [...treeEl.querySelectorAll<HTMLElement>(".row")];
+    const rows = [...treeEl.querySelectorAll<HTMLElement>('.row:not(.back):not([data-nav="project-link"])')];
     const i = rows.findIndex((r) => r.classList.contains("active"));
     const go = (n: number): void => {
       e.preventDefault();
@@ -1790,6 +1863,8 @@ async function main(): Promise<void> {
   const metaText = await api.readMeta().catch(() => "");
   S.meta = parseMeta(metaText);
   metaBase = parseMeta(metaText);
+  if (S.project && S.meta.projects[S.project]) S.view = { kind: "project", path: S.project };
+  else S.project = null;
   await recoverDraft();
   void initLibraryButton();
   lastStamp = await api.stamp().catch(() => "");

@@ -19,7 +19,7 @@ A writing app can't lose text, and a synced folder makes that harder.
 | Item | Status |
 |---|---|
 | Desktop app built in CI | Windows x64 + ARM64 installers (`windows-build.yml`); Linux and macOS compile, test and run the browser tests (`ci.yml`). macOS and Linux installers come with Phase 6 |
-| Tests | 23 unit tests for the structure model and merge (`npm test`), 20 Rust tests, 13 browser end-to-end scenarios (`npm run test:e2e`) |
+| Tests | 46 unit tests for the structure model, merge and projects (`npm test`), 20 Rust tests, 18 browser end-to-end scenarios (`npm run test:e2e`) |
 | Atomic sheet writes | Done: temp file, then rename |
 | Save-failure recovery | Done: retries every 5 s, text stashed and recovered as a copy on next start, warning before closing with unsaved text |
 | File watcher | Done: reloads the open sheet and the lists when files change outside the app (polling a cheap fingerprint every 2.5 s and on window focus) |
@@ -39,18 +39,18 @@ Known gaps: the save-retry path is covered by reasoning and Rust tests, not an a
 
 Not done from the original list: the toolbar's right-hand buttons are still the writing tools, not goal, navigator or style (those arrive with Phase 3).
 
-## Phase 2: Projects
+## Phase 2: Projects: done
 
 Ulysses calls this layer **Projects** (introduced in Ulysses 29, extended since, with templates in version 41). A project is a self-contained work, such as a novel, with its own sections and settings.
 
-- A project is a top-level folder flagged in `.scriptorium.json` (M)
-- Project settings: goal, deadline, keywords, export defaults (M)
-- Section rules: which sections count toward totals and exports, so Front Matter and Back Matter export while Notes and Characters behave like material (M)
-- Project templates, starting with a "Novel" layout: Front Matter, Chapters, Back Matter, Notes, Characters (M)
-- Sidebar "Projects" section that opens a focused view of just that project (M)
-- Per-sheet status such as Draft, if the Ulysses behaviour is confirmed first (S)
-
-Depends on Phase 1 (toolbar, sidebar) and uses goals and statistics from Phase 3.
+- **Projects section** in the sidebar. Opening one focuses the sidebar on just that project (with a way back to the Library): its progress, "Whole project", and its sections. A project is a group flagged in `.scriptorium.json`; its sheets stay plain files in plain folders
+- **Templates**: Novel (Front Matter, Chapters, Back Matter, Notes, Characters), Short story collection, Article or essay, Blank. Any existing group can also be made a project, and stop being one without touching its files
+- **Section types**: Manuscript (counts toward the goal, exported), Front/back matter (exported, not counted), Material (neither). Set from a section's right-click menu or the project settings. Material sections tint their sheets like single material sheets
+- **Goal and deadline**: a word goal with a progress bar, and a deadline with days left and the words a day still needed. Only manuscript counts, so notes and front matter never inflate the total
+- **Whole project view** reads front to back: sheets loose in the project, then each section in the order you arranged. Sheets nobody has arranged read in natural name order inside a project (Chapter 2 before Chapter 10), not newest first
+- **New sheets** in a project go to its first manuscript section; **Export project** joins everything that isn't material, in reading order
+- Quick open and the keyboard take you into the right project
+- **Not done**: per-sheet status labels such as "Draft" (I could not confirm Ulysses does this, so I left it out); character goals (word goals only); project keywords and export defaults, which belong with Phase 4 (keywords) and Phase 5 (export)
 
 ## Phase 3: Writing depth
 
