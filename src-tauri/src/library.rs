@@ -29,6 +29,10 @@ pub struct SheetInfo {
     pub preview: String,
     pub modified: u64,
     pub words: usize,
+    /// Looks like a copy a sync service made when two devices edited the same sheet.
+    pub conflict: bool,
+    /// For a conflicted copy: the sheet it was copied from, when that still exists.
+    pub original: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -241,6 +245,8 @@ pub fn sheets(root: &Path, group: &str, recursive: bool) -> Res<Vec<SheetInfo>> 
                 preview,
                 modified: modified_secs(p),
                 words: text.split_whitespace().count(),
+                conflict: conflict_original_stem(&stem_of(p)).is_some(),
+                original: original_path(p).map(|o| rel_of(root, &o)),
             }
         })
         .collect();
@@ -262,7 +268,7 @@ pub fn write_sheet(root: &Path, rel: &str, content: &str) -> Res<String> {
     if !is_md(&p) {
         return Err("Not a sheet".into());
     }
-    fs::write(&p, content).map_err(err)?;
+    write_atomic(&p, content)?;
     if is_untitled(&stem_of(&p)) {
         let slug = slugify(&first_line_title(content));
         if !slug.is_empty() {
@@ -275,6 +281,18 @@ pub fn write_sheet(root: &Path, rel: &str, content: &str) -> Res<String> {
         }
     }
     Ok(rel_of(root, &p))
+}
+
+/// Write to a hidden temp file in the same folder, then rename over the target, so a crash or a
+/// sync client reading mid-write never sees half a sheet.
+pub fn write_atomic(target: &Path, content: &str) -> Res<()> {
+    let dir = target.parent().ok_or("Sheet has no folder")?;
+    let tmp = dir.join(format!(".{}.tmp", name_of(target)));
+    fs::write(&tmp, content).map_err(err)?;
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        err(e)
+    })
 }
 
 pub fn create_sheet(root: &Path, group: &str) -> Res<String> {
@@ -435,9 +453,111 @@ pub fn read_meta(root: &Path) -> String {
 }
 
 pub fn write_meta(root: &Path, json: &str) -> Res<()> {
-    let tmp = root.join(format!("{META_FILE}.tmp"));
-    fs::write(&tmp, json).map_err(err)?;
-    fs::rename(&tmp, root.join(META_FILE)).map_err(err)
+    write_atomic(&root.join(META_FILE), json)
+}
+
+// ---------- change detection (for sync folders and outside edits) ----------
+
+/// A cheap fingerprint of everything visible in the library: folders, sheets and the structure
+/// file, by name, size and modification time. It changes whenever something changes on disk.
+pub fn stamp(root: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    fn walk(dir: &Path, h: &mut DefaultHasher) {
+        let mut entries: Vec<_> = fs::read_dir(dir).map(|rd| rd.flatten().collect()).unwrap_or_default();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            if path.is_dir() {
+                if !is_hidden(&name) {
+                    name.hash(h);
+                    walk(&path, h);
+                }
+            } else if is_md(&path) && !is_hidden(&name) || name == META_FILE {
+                let m = fs::metadata(&path).ok();
+                name.hash(h);
+                m.as_ref().map(|m| m.len()).hash(h);
+                m.and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .hash(h);
+            }
+        }
+    }
+    let mut h = DefaultHasher::new();
+    walk(root, &mut h);
+    format!("{:016x}", h.finish())
+}
+
+// ---------- sync conflicts ----------
+
+/// If a sheet's name looks like a sync service's conflicted copy, the name it was copied from.
+/// Recognised: Dropbox ("Name (Joe's conflicted copy 2026-01-01)") and Syncthing
+/// ("Name.sync-conflict-20260101-120000-ABCDEFG").
+fn conflict_original_stem(stem: &str) -> Option<String> {
+    let lower = stem.to_ascii_lowercase();
+    let original = if let Some(i) = lower.find("conflicted copy") {
+        // must be the parenthesised form, so a title that merely says it isn't flagged
+        let open = stem[..i].rfind('(')?;
+        let close = stem[i..].find(')').map(|c| i + c + 1).unwrap_or(stem.len());
+        format!("{}{}", stem[..open].trim_end(), &stem[close..])
+    } else if let Some(i) = lower.find(".sync-conflict-") {
+        stem[..i].to_string()
+    } else {
+        return None;
+    };
+    let original = original.trim().to_string();
+    if original.is_empty() {
+        None
+    } else {
+        Some(original)
+    }
+}
+
+fn original_path(copy: &Path) -> Option<PathBuf> {
+    let stem = conflict_original_stem(&stem_of(copy))?;
+    let candidate = copy.parent()?.join(format!("{stem}.md"));
+    candidate.is_file().then_some(candidate)
+}
+
+/// Settle a conflicted copy. `keep_copy` makes the copy the sheet (the old one goes to the
+/// trash); otherwise the copy goes to the trash. Returns the path of the surviving sheet.
+pub fn resolve_conflict(root: &Path, rel: &str, keep_copy: bool) -> Res<String> {
+    let copy = resolve(root, rel)?;
+    let original = original_path(&copy).ok_or("The original sheet isn't there any more")?;
+    if keep_copy {
+        delete_item(root, &rel_of(root, &original))?;
+        fs::rename(&copy, &original).map_err(err)?;
+    } else {
+        delete_item(root, rel)?;
+    }
+    Ok(rel_of(root, &original))
+}
+
+/// Keep text that must not be lost beside the sheet it came from, named like a conflicted copy.
+pub fn save_conflict_copy(root: &Path, rel: &str, content: &str) -> Res<String> {
+    let p = resolve(root, rel)?;
+    let dir = p.parent().ok_or("Sheet has no folder")?;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let target = unique_path(dir, &format!("{} (conflicted copy {})", stem_of(&p), utc_stamp(secs)), Some("md"));
+    write_atomic(&target, content)?;
+    Ok(rel_of(root, &target))
+}
+
+fn utc_stamp(secs: u64) -> String {
+    // days since 1970-01-01 to a civil date (Howard Hinnant's algorithm)
+    let z = (secs / 86400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let minutes = (secs % 86400) / 60;
+    format!("{year:04}-{month:02}-{day:02} {:02}{:02}", minutes / 60, minutes % 60)
 }
 
 // ---------- first run ----------
@@ -580,6 +700,92 @@ mod tests {
         assert_eq!(read_meta(&root), "{\"material\":[]}");
         assert!(sheets(&root, "", true).unwrap().is_empty());
         assert!(!tree(&root).children.iter().any(|g| g.name.starts_with('.')));
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file() {
+        let root = tmp("atomic");
+        let p = create_sheet(&root, "").unwrap();
+        let p = write_sheet(&root, &p, "hello").unwrap();
+        assert_eq!(read_sheet(&root, &p).unwrap(), "hello");
+        let names: Vec<_> = fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    }
+
+    #[test]
+    fn conflict_names_are_recognised() {
+        assert_eq!(conflict_original_stem("Chapter (Joe's conflicted copy 2026-01-01)").as_deref(), Some("Chapter"));
+        assert_eq!(conflict_original_stem("Chapter (Conflicted Copy)").as_deref(), Some("Chapter"));
+        assert_eq!(conflict_original_stem("Chapter.sync-conflict-20260101-120000-ABCDEFG").as_deref(), Some("Chapter"));
+        assert_eq!(conflict_original_stem("Chapter 2"), None);
+        assert_eq!(conflict_original_stem("A story about a conflicted copy editor"), None);
+        assert_eq!(conflict_original_stem("(conflicted copy)"), None);
+    }
+
+    #[test]
+    fn conflicts_are_flagged_and_resolvable() {
+        let root = tmp("conflict");
+        fs::write(root.join("Chapter.md"), "mine").unwrap();
+        fs::write(root.join("Chapter (Joe's conflicted copy 2026-01-01).md"), "theirs").unwrap();
+        let list = sheets(&root, "", false).unwrap();
+        let copy = list.iter().find(|s| s.conflict).expect("copy flagged");
+        assert_eq!(copy.original.as_deref(), Some("Chapter.md"));
+        assert!(list.iter().filter(|s| !s.conflict).all(|s| s.original.is_none()));
+
+        // keep the copy: it replaces the original, the old text survives in the trash
+        let kept = resolve_conflict(&root, &copy.path, true).unwrap();
+        assert_eq!(kept, "Chapter.md");
+        assert_eq!(read_sheet(&root, "Chapter.md").unwrap(), "theirs");
+        assert_eq!(sheets(&root, "", false).unwrap().len(), 1);
+        assert!(root.join(".trash").read_dir().unwrap().count() >= 1);
+
+        // discard a copy
+        fs::write(root.join("Chapter.sync-conflict-20260101-120000-ABC.md"), "other").unwrap();
+        resolve_conflict(&root, "Chapter.sync-conflict-20260101-120000-ABC.md", false).unwrap();
+        assert_eq!(read_sheet(&root, "Chapter.md").unwrap(), "theirs");
+        assert_eq!(sheets(&root, "", false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn conflict_copy_keeps_text_beside_the_sheet() {
+        let root = tmp("copy");
+        fs::write(root.join("Chapter.md"), "disk").unwrap();
+        let rel = save_conflict_copy(&root, "Chapter.md", "my unsaved words").unwrap();
+        assert!(rel.starts_with("Chapter (conflicted copy "), "{rel}");
+        assert_eq!(read_sheet(&root, &rel).unwrap(), "my unsaved words");
+        let list = sheets(&root, "", false).unwrap();
+        assert_eq!(list.iter().find(|s| s.path == rel).unwrap().original.as_deref(), Some("Chapter.md"));
+    }
+
+    #[test]
+    fn utc_stamp_is_correct() {
+        assert_eq!(utc_stamp(0), "1970-01-01 0000");
+        assert_eq!(utc_stamp(1_767_225_600 + 3600 * 13 + 60 * 7), "2026-01-01 1307");
+        assert_eq!(utc_stamp(951_782_400), "2000-02-29 0000");
+    }
+
+    #[test]
+    fn stamp_changes_when_anything_visible_changes() {
+        let root = tmp("stamp");
+        let a = stamp(&root);
+        assert_eq!(a, stamp(&root));
+        let p = create_sheet(&root, "").unwrap();
+        let b = stamp(&root);
+        assert_ne!(a, b);
+        write_sheet(&root, &p, "some words").unwrap();
+        let c = stamp(&root);
+        assert_ne!(b, c);
+        write_meta(&root, "{}").unwrap();
+        let d = stamp(&root);
+        assert_ne!(c, d);
+        create_group(&root, "", "Book").unwrap();
+        assert_ne!(d, stamp(&root));
+        // hidden files and the trash are ignored
+        let e = stamp(&root);
+        fs::write(root.join(".scratch"), "x").unwrap();
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        fs::write(root.join(".trash/x.md"), "x").unwrap();
+        assert_eq!(e, stamp(&root));
     }
 
     #[test]

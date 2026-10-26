@@ -119,3 +119,47 @@ export function arrange<T extends { path: string }>(m: Meta, group: string, shee
 /** Marks that a glued sheet's text is a single document: this exact string joins its sheets. */
 export const GLUE_MARK = "<!-- scriptorium:next-sheet -->";
 export const GLUE_JOIN = `\n\n${GLUE_MARK}\n\n`;
+
+// ---- merging, for when two devices change the structure file through a synced folder
+
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
+/** Set merge: whatever `mine` added or removed relative to `base`, applied on top of `theirs`. */
+function mergeSet<T>(base: T[], mine: T[], theirs: T[]): T[] {
+  const key = (x: T) => JSON.stringify(x);
+  const inBase = new Set(base.map(key));
+  const inMine = new Set(mine.map(key));
+  const removed = new Set([...inBase].filter((k) => !inMine.has(k)));
+  const kept = theirs.filter((x) => !removed.has(key(x)));
+  const have = new Set(kept.map(key));
+  return [...kept, ...mine.filter((x) => !inBase.has(key(x)) && !have.has(key(x)))];
+}
+
+/**
+ * Three-way merge of the structure file. `base` is the last state both sides agreed on, `mine`
+ * is this app's current state, `theirs` is what is on disk now. Changes made on both sides to
+ * different things all survive; where both touched the same thing, lists are combined and
+ * single values take `mine`.
+ */
+export function mergeMeta(base: Meta, mine: Meta, theirs: Meta): Meta {
+  const out = emptyMeta();
+  for (const k of new Set([...Object.keys(base.order), ...Object.keys(mine.order), ...Object.keys(theirs.order)])) {
+    const b = base.order[k] ?? [];
+    const m = mine.order[k] ?? [];
+    const t = theirs.order[k] ?? [];
+    out.order[k] = same(m, b) ? t : same(t, b) ? m : mergeSet(b, m, t);
+  }
+  out.material = mergeSet(base.material, mine.material, theirs.material);
+  out.glue = mergeSet(base.glue, mine.glue, theirs.glue);
+  const byId = (fs: Filter[]) => new Map(fs.map((f) => [f.id, f]));
+  const [fb, fm, ft] = [byId(base.filters), byId(mine.filters), byId(theirs.filters)];
+  for (const id of new Set([...fb.keys(), ...fm.keys(), ...ft.keys()])) {
+    const [b, m, t] = [fb.get(id), fm.get(id), ft.get(id)];
+    if (b && !m) continue; // deleted here
+    if (b && !t && same(m, b)) continue; // deleted there, untouched here
+    const pick = m && (!b || !same(m, b)) ? m : (t ?? m);
+    if (pick) out.filters.push(pick);
+  }
+  tidy(out);
+  return out;
+}

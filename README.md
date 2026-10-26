@@ -3,7 +3,7 @@
 A calm, three-pane Markdown writing app for Windows (and macOS/Linux): **library → sheet list → editor**.
 
 Your library is a plain folder of `.md` files. Groups are folders, sheets are files, so your writing never depends on this app. The only extra is `.scriptorium.json` in the library folder (sheet order, material marks, glue, filters); delete it and your writing is untouched.
-Default location: `Documents/Scriptorium` (override with the `SCRIPTORIUM_LIBRARY` environment variable).
+Default location: `Documents/Scriptorium`. Change it from the sidebar, or fix it with the `SCRIPTORIUM_LIBRARY` environment variable (which takes priority).
 
 ## What's in this first version
 
@@ -19,6 +19,8 @@ Default location: `Documents/Scriptorium` (override with the `SCRIPTORIUM_LIBRAR
 - **Glued sheets**: select neighbouring sheets (Ctrl/Cmd or Shift-click), right-click → Glue. They edit as one continuous text but stay separate files; Unglue any time
 - **Filters** (smart folders): saved searches by text, group and recency, listed in the sidebar; search the library and press "Save as filter"
 - Right-click a group → Export group… joins its sheets in your order, skipping material
+- **Sync-safe**: put the library in any synced folder (Dropbox, iCloud Drive, Proton Drive, ...). Changes made elsewhere appear within seconds, the structure file is merged between devices, and conflicted copies are flagged under Conflicts. Text you typed is never allowed to overwrite a version changed elsewhere: it is kept as a conflicted copy
+- Choose the library folder from the button at the bottom of the sidebar
 - Delete moves things to `.trash` inside the library, nothing is lost
 - Export to DOCX / PDF / HTML / ODT / EPUB through [Pandoc](https://pandoc.org) (install it separately; PDF also needs a LaTeX engine)
 
@@ -41,6 +43,8 @@ npm install
 npm run tauri dev      # run the desktop app
 npm run tauri build    # make an installer (src-tauri/target/release/bundle)
 ```
+
+Checks: `npm test` (unit), `cd src-tauri && cargo test --lib` (Rust), `npm run test:e2e` (browser; needs Playwright with Chromium available to Node).
 
 `npm run dev` on its own runs the UI in a browser against a throwaway localStorage library, which is handy for working on the interface.
 

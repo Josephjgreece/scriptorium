@@ -14,6 +14,10 @@ export interface SheetInfo {
   preview: string;
   modified: number;
   words: number;
+  /** a copy a sync service made when two devices edited the same sheet */
+  conflict: boolean;
+  /** for a conflicted copy: the sheet it was copied from, when that still exists */
+  original: string | null;
 }
 export interface SearchHit {
   path: string;
@@ -38,6 +42,16 @@ export interface Api {
   exportSheet(path: string, suggestedName: string): Promise<string | null>;
   /** Export text that isn't one file on disk (glued sheets). */
   exportText(content: string, suggestedName: string): Promise<string | null>;
+  /** True when the library folder is fixed by the SCRIPTORIUM_LIBRARY environment variable. */
+  libraryLocked(): Promise<boolean>;
+  /** Ask for a folder and switch to it; returns its path, or null if cancelled. */
+  chooseLibrary(): Promise<string | null>;
+  /** Changes whenever anything in the library changes on disk (outside edits, sync). */
+  stamp(): Promise<string>;
+  /** Settle a conflicted copy: keep it (replacing the original) or discard it. */
+  resolveConflict(path: string, keepCopy: boolean): Promise<string>;
+  /** Save text beside a sheet as a conflicted copy, so nothing is lost. Returns the new path. */
+  saveConflictCopy(path: string, content: string): Promise<string>;
   /** Structure metadata (order, material, glue, filters) as JSON text; "" when none saved yet. */
   readMeta(): Promise<string>;
   writeMeta(json: string): Promise<void>;
@@ -75,6 +89,15 @@ async function tauriApi(): Promise<Api> {
       await invoke("export_text", { content, dest });
       return dest;
     },
+    libraryLocked: () => invoke("library_locked"),
+    async chooseLibrary() {
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const dir = await open({ directory: true, multiple: false, title: "Choose library folder" });
+      return typeof dir === "string" ? invoke<string>("set_library", { path: dir }) : null;
+    },
+    stamp: () => invoke("library_stamp"),
+    resolveConflict: (path, keepCopy) => invoke("resolve_conflict", { path, keepCopy }),
+    saveConflictCopy: (path, content) => invoke("save_conflict_copy", { path, content }),
     readMeta: () => invoke("read_meta"),
     writeMeta: (json) => invoke("write_meta", { json }),
   };
@@ -153,9 +176,27 @@ function webApi(): Api {
   } catch {
     store = { files: { "Welcome.md": { content: WELCOME, modified: Date.now() } }, dirs: [] };
   }
+  let lastRaw = localStorage.getItem(KEY);
+  // Pick up changes made behind our back (another tab, like a sync client touching the folder).
+  const reload = () => {
+    const raw = localStorage.getItem(KEY);
+    if (raw && raw !== lastRaw) {
+      try {
+        store = JSON.parse(raw) as MockStore;
+        lastRaw = raw;
+      } catch {
+        /* ignore a half-written value */
+      }
+    }
+  };
+  const conflictOf = (p: string): string | null => {
+    const m = baseOf(p).replace(/\.md$/, "").match(/^(.*?)\s*\([^)]*conflicted copy[^)]*\)(.*)$/i);
+    return m && (m[1] + m[2]).trim() ? join(parentOf(p), `${(m[1] + m[2]).trim()}.md`) : null;
+  };
   const persist = () => {
     try {
-      localStorage.setItem(KEY, JSON.stringify(store));
+      lastRaw = JSON.stringify(store);
+      localStorage.setItem(KEY, lastRaw);
     } catch {
       /* storage unavailable: keep in memory only */
     }
@@ -182,17 +223,26 @@ function webApi(): Api {
   return {
     desktop: false,
     libraryRoot: async () => "Browser preview (stored in this browser)",
-    listTree: async () => build(""),
-    listSheets: async (group, recursive) =>
-      filesIn(group, recursive)
+    listTree: async () => {
+      reload();
+      return build("");
+    },
+    listSheets: async (group, recursive) => {
+      reload();
+      return filesIn(group, recursive)
         .map((p) => {
           const f = store.files[p];
           const [title, preview] = titleAndPreview(f.content, baseOf(p).replace(/\.md$/, ""));
-          return { path: p, title, preview, modified: Math.floor(f.modified / 1000), words: (f.content.match(/\S+/g) ?? []).length };
+          return { path: p, title, preview, modified: Math.floor(f.modified / 1000), words: (f.content.match(/\S+/g) ?? []).length, conflict: conflictOf(p) !== null, original: conflictOf(p) && conflictOf(p)! in store.files ? conflictOf(p) : null };
         })
-        .sort((a, b) => b.modified - a.modified || a.title.localeCompare(b.title)),
-    readSheet: (p) => (p in store.files ? Promise.resolve(store.files[p].content) : fail("Not found")),
+        .sort((a, b) => b.modified - a.modified || a.title.localeCompare(b.title));
+    },
+    readSheet: async (p) => {
+      reload();
+      return p in store.files ? store.files[p].content : fail("Not found");
+    },
     async writeSheet(p, content) {
+      reload();
       if (!(p in store.files)) return fail("Not found");
       store.files[p] = { content, modified: Date.now() };
       let out = p;
@@ -288,6 +338,26 @@ function webApi(): Api {
     },
     async exportText(content, suggestedName) {
       return download(content, suggestedName);
+    },
+    libraryLocked: async () => false,
+    chooseLibrary: async () => null,
+    stamp: async () => {
+      reload();
+      return String(Object.entries(store.files).reduce((n, [k, f]) => n + f.modified + f.content.length + k.length, store.dirs.length) + (localStorage.getItem(META_KEY)?.length ?? 0));
+    },
+    async resolveConflict(path, keepCopy) {
+      const original = conflictOf(path);
+      if (!original || !(original in store.files)) return fail("The original sheet isn't there any more");
+      if (keepCopy) store.files[original] = store.files[path];
+      delete store.files[path];
+      persist();
+      return original;
+    },
+    async saveConflictCopy(path, content) {
+      const p = unique(parentOf(path), `${baseOf(path).replace(/\.md$/, "")} (conflicted copy)`, "md");
+      store.files[p] = { content, modified: Date.now() };
+      persist();
+      return p;
     },
     readMeta: async () => localStorage.getItem(META_KEY) ?? "",
     async writeMeta(json) {

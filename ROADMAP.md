@@ -12,20 +12,22 @@ Effort is rough: **S** under a day, **M** a few days, **L** a week or more.
 - Group and glued export through Pandoc, with material left out
 - Structure that Markdown can't hold lives in `.scriptorium.json` in the library root
 
-## Phase 0: Trustworthy and sync-safe
+## Phase 0: Trustworthy and sync-safe: done
 
 A writing app can't lose text, and a synced folder makes that harder.
 
-| Item | Why | Effort |
-|---|---|---|
-| Build the desktop app in CI (Windows x64 + ARM64 done in `.github/workflows/windows-build.yml`; macOS and Linux still to add) | The Tauri side has never been compiled in this project's dev environment, so the Rust commands are unproven in the real shell | M |
-| Unit tests for `meta.ts`; commit the browser end-to-end test | Order, glue and remap logic is easy to break | S |
-| Atomic sheet writes (temp file, then rename) | A crash mid-save can corrupt a sheet | S |
-| Save-failure recovery: keep unsaved text, retry, warn on quit | Today "Not saved" is only a toast | S |
-| File watcher: reload when files change outside the app | Needed for any synced folder or external editor | M |
-| "Choose library folder" setting | Replaces the `SCRIPTORIUM_LIBRARY` environment variable; one click to use Proton Drive, iCloud Drive, Dropbox or any synced folder | S |
-| Conflicted-copy handling | Sync services create files like "Chapter 2 (conflicted copy)"; show them clearly instead of hiding or mixing them up | M |
-| Safe `.scriptorium.json` under sync | One shared file means two devices can overwrite each other's order, glue and filters; merge per key or split the file | M |
+| Item | Status |
+|---|---|
+| Desktop app built in CI | Windows x64 + ARM64 installers (`windows-build.yml`); Linux and macOS compile, test and run the browser tests (`ci.yml`). macOS and Linux installers come with Phase 6 |
+| Tests | 19 unit tests for the structure model and merge (`npm test`), 15 Rust tests, 5 browser end-to-end scenarios (`npm run test:e2e`) |
+| Atomic sheet writes | Done: temp file, then rename |
+| Save-failure recovery | Done: retries every 5 s, text stashed and recovered as a copy on next start, warning before closing with unsaved text |
+| File watcher | Done: reloads the open sheet and the lists when files change outside the app (polling a cheap fingerprint every 2.5 s and on window focus) |
+| Choose library folder | Done: button at the bottom of the sidebar; remembered between runs |
+| Conflicted copies | Done: Dropbox and Syncthing style copies are flagged, listed under Conflicts, and can be kept or discarded; unsaved typing that would overwrite an outside edit is kept as a conflicted copy instead |
+| Safe `.scriptorium.json` under sync | Done: three-way merge on every write and whenever another device changes it |
+
+Known gaps: the save-retry path is covered by reasoning and Rust tests, not an automated end-to-end test; conflicted-copy detection knows Dropbox and Syncthing names only (iCloud, OneDrive and Google Drive use other patterns); the file watcher polls rather than using OS notifications, which is plenty for a writing app but not instant.
 
 ## Phase 1: Library parity
 

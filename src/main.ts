@@ -1,7 +1,7 @@
 import "./styles.css";
 import { loadApi, type Api, type Group, type SearchHit, type SheetInfo } from "./api";
 import { createEditor, makeState } from "./editor";
-import { arrange, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
+import { arrange, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parseMeta, remapMeta, type Filter, type Meta } from "./meta";
 
 // ------------------------------------------------------------------ small helpers
 
@@ -52,6 +52,8 @@ const ICONS: Record<string, string> = {
   export: '<path d="M12 15V4M8 8l4-4 4 4"/><path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/>',
   focus: '<path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4"/>',
   chev: '<path d="M9 6l6 6-6 6"/>',
+  warn: '<path d="M12 4.5l8.5 15h-17z"/><path d="M12 10v4.2M12 16.8v.2"/>',
+  folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
   funnel: '<path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/>',
   torn: '<path d="M6 4h12v13l-2 2.2-2-2.2-2 2.2-2-2.2-2 2.2-2-2.2z"/><path d="M9 9h6M9 12.5h4"/>',
   glue: '<path d="M10 14a3.5 3.5 0 0 0 5 0l3-3a3.5 3.5 0 0 0-5-5l-1 1"/><path d="M14 10a3.5 3.5 0 0 0-5 0l-3 3a3.5 3.5 0 0 0 5 5l1-1"/>',
@@ -194,7 +196,7 @@ function showMenu(x: number, y: number, items: MenuItem[]): void {
 async function main(): Promise<void> {
   const api: Api = await loadApi();
 
-  type View = { kind: "all" } | { kind: "recent" } | { kind: "filter"; id: string } | { kind: "group"; path: string };
+  type View = { kind: "all" } | { kind: "recent" } | { kind: "conflicts" } | { kind: "filter"; id: string } | { kind: "group"; path: string };
   const S = {
     tree: null as Group | null,
     view: { kind: "group", path: "" } as View,
@@ -205,6 +207,8 @@ async function main(): Promise<void> {
     glue: null as string[] | null,
     savedParts: [] as string[],
     meta: emptyMeta() as Meta,
+    /** every sheet in the library, refreshed with the lists */
+    all: [] as SheetInfo[],
     /** keys (first path) of the selected list rows */
     sel: new Set<string>(),
     anchor: null as string | null,
@@ -292,10 +296,26 @@ async function main(): Promise<void> {
   }
 
   // -------- structure metadata (order, material, glue, filters)
+  // `metaBase` is the last structure both this app and the disk agreed on. Writing merges it with
+  // whatever another device saved in the meantime, so synced devices don't overwrite each other.
+  let metaBase: Meta = emptyMeta();
   let metaChain: Promise<void> = Promise.resolve();
+  const json = (m: Meta): string => JSON.stringify(m);
+
+  async function mergeAndWrite(): Promise<void> {
+    const disk = parseMeta(await api.readMeta());
+    if (json(disk) !== json(metaBase)) S.meta = mergeMeta(metaBase, S.meta, disk);
+    if (json(S.meta) !== json(disk)) await api.writeMeta(json(S.meta));
+    metaBase = parseMeta(json(S.meta));
+  }
   function persistMeta(): void {
-    const json = JSON.stringify(S.meta);
-    metaChain = metaChain.then(() => api.writeMeta(json)).catch((e) => toast(`Couldn't save structure: ${msg(e)}`));
+    const before = json(S.meta);
+    metaChain = metaChain
+      .then(mergeAndWrite)
+      .then(() => {
+        if (json(S.meta) !== before) void refresh(); // another device's changes arrived with ours
+      })
+      .catch((e) => toast(`Couldn't save structure: ${msg(e)}`));
   }
   const isMaterial = (path: string | null): boolean => !!path && S.meta.material.includes(path);
   const isOpen = (path: string): boolean => path === S.current || !!S.glue?.includes(path);
@@ -341,6 +361,26 @@ async function main(): Promise<void> {
     updateStats();
   }
 
+  let saving = 0;
+  let failing = false;
+  let retryTimer = 0;
+  const DRAFT_KEY = "scriptorium-unsaved-draft";
+
+  const isDirty = (): boolean => !!S.current && S.version !== S.savedVersion;
+
+  /** Put the open text back from disk (after it changed elsewhere), keeping the caret and scroll. */
+  function loadOpen(texts: string[]): void {
+    const head = view.state.selection.main.head;
+    const top = view.scrollDOM.scrollTop;
+    S.savedParts = texts;
+    const joined = texts.join(GLUE_JOIN);
+    setDoc(joined, !!S.glue);
+    S.version = S.savedVersion = 0;
+    view.dispatch({ selection: { anchor: Math.min(head, joined.length) } });
+    view.scrollDOM.scrollTop = top;
+    updateStats();
+  }
+
   async function doSave(): Promise<void> {
     if (!S.current || S.version === S.savedVersion) return;
     const v = S.version;
@@ -348,27 +388,82 @@ async function main(): Promise<void> {
     const paths = S.glue ?? [S.current];
     const parts = S.glue ? text.split(GLUE_JOIN) : [text];
     if (parts.length !== paths.length) throw new Error("a divider between glued sheets was damaged");
-    const renamed = new Map<string, string>();
-    for (let i = 0; i < paths.length; i++) {
-      if (parts[i] === S.savedParts[i]) continue;
-      const np = await api.writeSheet(paths[i], parts[i]);
-      S.savedParts[i] = parts[i];
-      if (np !== paths[i]) renamed.set(paths[i], np);
+    saving++;
+    try {
+      const renamed = new Map<string, string>();
+      let elsewhere: string | null = null;
+      for (let i = 0; i < paths.length; i++) {
+        if (parts[i] === S.savedParts[i]) continue;
+        // Did the file change outside the app since we loaded it? Never overwrite that silently:
+        // the other version stays as the sheet, and what was typed here is kept as a copy.
+        const onDisk = await api.readSheet(paths[i]).catch(() => null);
+        if (onDisk !== null && onDisk !== S.savedParts[i]) {
+          await api.saveConflictCopy(paths[i], parts[i]);
+          S.savedParts[i] = onDisk;
+          elsewhere = paths[i];
+          continue;
+        }
+        const np = await api.writeSheet(paths[i], parts[i]);
+        S.savedParts[i] = parts[i];
+        if (np !== paths[i]) renamed.set(paths[i], np);
+      }
+      S.savedVersion = v;
+      localStorage.removeItem(DRAFT_KEY);
+      if (renamed.size && S.current === paths[0]) applyRemap((p) => renamed.get(p) ?? p);
+      if (elsewhere) {
+        if (S.version === v) loadOpen(S.savedParts);
+        toast(`“${titleOf(elsewhere)}” was changed elsewhere. Your edits are kept as a conflicted copy beside it.`);
+        setSave("Changed elsewhere");
+      } else {
+        setSave(S.version === v ? "Saved" : "Editing…");
+      }
+      scheduleListRefresh();
+    } finally {
+      saving--;
     }
-    S.savedVersion = v;
-    // an Untitled sheet is renamed after its first line when it gets one
-    if (renamed.size && S.current === paths[0]) applyRemap((p) => renamed.get(p) ?? p);
-    setSave(S.version === v ? "Saved" : "Editing…");
-    scheduleListRefresh();
   }
 
   function flushSave(): Promise<void> {
     clearTimeout(saveTimer);
-    chain = chain.then(doSave).catch((e) => {
-      setSave("Not saved");
-      toast(`Couldn't save: ${msg(e)}`);
-    });
+    chain = chain
+      .then(doSave)
+      .then(() => {
+        failing = false;
+        clearTimeout(retryTimer);
+      })
+      .catch((e) => {
+        setSave("Not saved. Retrying…");
+        if (!failing) toast(`Couldn't save: ${msg(e)}. Your text is safe here and I'll keep trying.`);
+        failing = true;
+        stashDraft();
+        clearTimeout(retryTimer);
+        retryTimer = window.setTimeout(() => void flushSave(), 5000);
+      });
     return chain;
+  }
+
+  /** Last resort for text that couldn't be written: keep it where it survives closing the app. */
+  function stashDraft(): void {
+    if (!isDirty() || !S.current) return;
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ path: S.glue?.[0] ?? S.current, text: view.state.doc.toString() }));
+    } catch {
+      /* nothing more we can do */
+    }
+  }
+
+  /** On start-up: text stashed because it couldn't be saved becomes a copy beside its sheet. */
+  async function recoverDraft(): Promise<void> {
+    const raw = ls(DRAFT_KEY);
+    if (!raw) return;
+    try {
+      const d = JSON.parse(raw) as { path: string; text: string };
+      const copy = await api.saveConflictCopy(d.path, d.text.split(GLUE_JOIN).join("\n\n"));
+      localStorage.removeItem(DRAFT_KEY);
+      toast(`Recovered text that couldn't be saved last time: “${copy.split("/").pop()?.replace(/\.md$/i, "")}”`);
+    } catch {
+      /* the sheet may be gone; keep the draft for next time */
+    }
   }
 
   function scheduleListRefresh(): void {
@@ -380,18 +475,25 @@ async function main(): Promise<void> {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) void flushSave();
   });
-  window.addEventListener("beforeunload", () => void flushSave());
+  window.addEventListener("beforeunload", (e) => {
+    if (!isDirty()) return;
+    stashDraft(); // if the write below doesn't finish, the text is recovered next start
+    void flushSave();
+    e.preventDefault();
+  });
 
   // -------- data refresh
   async function refresh(): Promise<void> {
     try {
       S.tree = await api.listTree();
+      S.all = await api.listSheets("", true);
       S.sheets = await loadSheets();
     } catch (e) {
       // The group we were looking at may be gone; fall back to the root.
       S.view = { kind: "group", path: "" };
       try {
         S.tree = await api.listTree();
+        S.all = await api.listSheets("", true);
         S.sheets = await api.listSheets("", false);
       } catch (e2) {
         toast(msg(e2 ?? e));
@@ -405,16 +507,17 @@ async function main(): Promise<void> {
   async function loadSheets(): Promise<SheetInfo[]> {
     const v = S.view;
     if (v.kind === "group") return arrange(S.meta, v.path, await api.listSheets(v.path, false));
-    if (v.kind === "all") return api.listSheets("", true);
+    if (v.kind === "all") return S.all;
+    if (v.kind === "conflicts") return S.all.filter((x) => x.conflict);
     if (v.kind === "recent") {
       const since = Date.now() / 1000 - RECENT_SECS;
-      return (await api.listSheets("", true)).filter((x) => x.modified >= since);
+      return S.all.filter((x) => x.modified >= since);
     }
     // a saved filter: text, group and recency, all of which must match
     const f = S.meta.filters.find((x) => x.id === v.id);
     if (!f) return [];
     const since = f.days ? Date.now() / 1000 - f.days * 86400 : 0;
-    let found = (await api.listSheets(f.group, true)).filter((x) => x.modified >= since);
+    let found = S.all.filter((x) => x.modified >= since && (!f.group || x.path.startsWith(f.group + "/")));
     if (f.query.trim()) {
       const hits = new Set((await api.search(f.query)).map((x) => x.path));
       found = found.filter((x) => hits.has(x.path));
@@ -428,15 +531,19 @@ async function main(): Promise<void> {
   function renderTree(): void {
     treeEl.replaceChildren();
     if (!S.tree) return;
-    const smartRow = (kind: "all" | "recent", ico: string, label: string): HTMLElement =>
+    const smartRow = (kind: "all" | "recent" | "conflicts", ico: string, label: string, count = 0): HTMLElement =>
       h(
         "div",
-        { class: "row" + (S.view.kind === kind ? " active" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind }) },
+        { class: "row" + (S.view.kind === kind ? " active" : "") + (kind === "conflicts" ? " warn" : ""), style: "padding-left:8px", onclick: () => void selectView({ kind }) },
         h("span", { class: "chev" }),
         icon(ico),
         h("span", { class: "name" }, label),
+        count ? h("span", { class: "count" }, String(count)) : null,
       );
     treeEl.append(h("div", { class: "tree-label" }, "Library"), smartRow("all", "all", "All"), smartRow("recent", "clock", "Last 7 Days"));
+    // only shown when a sync service has left conflicted copies behind
+    const conflicts = S.all.filter((x) => x.conflict).length;
+    if (conflicts || S.view.kind === "conflicts") treeEl.append(smartRow("conflicts", "warn", "Conflicts", conflicts));
 
     treeEl.append(
       h(
@@ -586,7 +693,7 @@ async function main(): Promise<void> {
     }
     const v = S.view;
     const name =
-      v.kind === "all" ? "All" : v.kind === "recent" ? "Last 7 Days" : v.kind === "filter" ? (S.meta.filters.find((f) => f.id === v.id)?.name ?? "Filter") : v.path === "" ? "Inbox" : (v.path.split("/").pop() ?? "");
+      v.kind === "all" ? "All" : v.kind === "recent" ? "Last 7 Days" : v.kind === "conflicts" ? "Conflicts" : v.kind === "filter" ? (S.meta.filters.find((f) => f.id === v.id)?.name ?? "Filter") : v.path === "" ? "Inbox" : (v.path.split("/").pop() ?? "");
     const words = S.sheets.filter((x) => !isMaterial(x.path)).reduce((n, x) => n + x.words, 0);
     listTitle.append(
       h("span", { class: "lt-name" }, name),
@@ -594,7 +701,7 @@ async function main(): Promise<void> {
     );
     units = unitsOf(S.sheets);
     if (!units.length) {
-      sheetsEl.append(h("div", { class: "none" }, v.kind === "recent" ? "Nothing written in the last 7 days." : v.kind === "filter" ? "No sheets match this filter." : "No sheets here yet."));
+      sheetsEl.append(h("div", { class: "none" }, v.kind === "recent" ? "Nothing written in the last 7 days." : v.kind === "conflicts" ? "No conflicts. Everything is in agreement." : v.kind === "filter" ? "No sheets match this filter." : "No sheets here yet."));
       return;
     }
     for (const u of units) sheetsEl.append(unitRow(u));
@@ -609,18 +716,20 @@ async function main(): Promise<void> {
     const first = u.sheets[0];
     const mat = isMaterial(first.path);
     const glued = u.sheets.length > 1;
+    const conflict = first.conflict && !glued;
     const words = u.sheets.reduce((n, x) => n + x.words, 0);
     const meta = [
       whenText(Math.max(...u.sheets.map((x) => x.modified))),
       glued ? `${u.sheets.length} glued sheets · ${plural(words, "word")}` : plural(words, "word"),
+      conflict ? "Conflicted copy" : "",
       S.view.kind !== "group" ? groupOf(first.path) : "",
     ]
       .filter(Boolean)
       .join(" · ");
-    const badge = mat ? icon("torn") : glued ? icon("glue") : null;
+    const badge = conflict ? icon("warn") : mat ? icon("torn") : glued ? icon("glue") : null;
     const row = h(
       "div",
-      { class: "sheet-item" + (S.sel.has(u.key) ? " selected" : "") + (mat ? " material" : "") + (glued ? " glued" : ""), draggable: "true", "data-key": u.key },
+      { class: "sheet-item" + (S.sel.has(u.key) ? " selected" : "") + (mat ? " material" : "") + (glued ? " glued" : "") + (conflict ? " conflict" : ""), draggable: "true", "data-key": u.key },
       h("div", { class: "si-head" }, h("div", { class: "si-title" }, first.title || "Untitled"), badge ? h("span", { class: "si-badge" }, badge) : null),
       h("div", { class: "si-prev" }, first.preview),
       h("div", { class: "si-meta" }, meta),
@@ -716,6 +825,14 @@ async function main(): Promise<void> {
     const paths = targets.flatMap((t) => t.paths);
     const allMaterial = paths.every((p) => isMaterial(p));
     const items: MenuItem[] = [{ label: "Open", run: () => void openSheet(u.paths[0]) }];
+    const copy = targets.length === 1 && u.sheets[0].conflict ? u.sheets[0] : null;
+    if (copy?.original) {
+      items.push(
+        { label: "Open original", run: () => void openSheet(copy.original!) },
+        { label: "Keep this version (replaces the original)", run: () => void settleConflict(copy.path, true) },
+        { label: "Discard this copy", run: () => void settleConflict(copy.path, false) },
+      );
+    }
     if (canGlue(targets)) items.push({ label: `Glue ${paths.length} sheets`, run: () => void glueUnits(targets) });
     if (targets.length === 1 && u.paths.length > 1) items.push({ label: "Unglue sheets", run: () => void unglue(u) });
     items.push({ label: allMaterial ? "Remove material mark" : "Mark as material", run: () => void setMaterial(paths, !allMaterial) });
@@ -919,6 +1036,19 @@ async function main(): Promise<void> {
     await refresh();
   }
 
+  async function settleConflict(path: string, keepCopy: boolean): Promise<void> {
+    await flushSave();
+    try {
+      const survivor = await api.resolveConflict(path, keepCopy);
+      afterDelete((p) => p === path);
+      if (S.current && isOpen(survivor)) await reopen(survivor);
+      await refresh();
+      toast(keepCopy ? "Kept this version. The old one is in .trash" : "Copy moved to .trash");
+    } catch (e) {
+      toast(msg(e));
+    }
+  }
+
   // -------- export
   const titleOf = (path: string): string => S.sheets.find((x) => x.path === path)?.title ?? (path.split("/").pop() ?? "Sheet").replace(/\.md$/i, "");
 
@@ -1033,6 +1163,76 @@ async function main(): Promise<void> {
     await refresh();
   }
 
+  // -------- outside changes (sync services, other editors, other devices)
+  let lastStamp = "";
+  let checking = false;
+
+  async function checkOutside(): Promise<void> {
+    if (checking || saving || document.hidden) return;
+    checking = true;
+    try {
+      const stamp = await api.stamp();
+      if (stamp === lastStamp) return;
+      lastStamp = stamp;
+      // structure saved by another device
+      const disk = parseMeta(await api.readMeta());
+      if (json(disk) !== json(metaBase)) {
+        S.meta = mergeMeta(metaBase, S.meta, disk);
+        metaBase = disk;
+        if (json(S.meta) !== json(disk)) persistMeta();
+      }
+      // the sheet being written: take the new text unless there are unsaved edits here
+      // (those are protected when saving, see doSave)
+      if (S.current && !isDirty()) {
+        try {
+          const texts = await Promise.all((S.glue ?? [S.current]).map((p) => api.readSheet(p)));
+          if (!isDirty() && !saving && texts.some((t, i) => t !== S.savedParts[i])) loadOpen(texts);
+        } catch {
+          toast("The open sheet was moved or deleted outside Scriptorium");
+          closeEditor();
+        }
+      }
+      await refresh();
+    } catch {
+      /* a drive that is briefly unavailable: try again on the next tick */
+    } finally {
+      checking = false;
+    }
+  }
+  window.setInterval(() => void checkOutside(), 2500);
+  window.addEventListener("focus", () => void checkOutside());
+
+  // -------- library folder
+  async function initLibraryButton(): Promise<void> {
+    const root = await api.libraryRoot().catch(() => "");
+    const locked = await api.libraryLocked().catch(() => false);
+    const btn = el("btnLibrary");
+    btn.title = root;
+    btn.append(icon("folder"), h("span", { class: "lib-name" }, root.split(/[\\/]/).filter(Boolean).pop() ?? root));
+    btn.addEventListener("click", () => {
+      const r = btn.getBoundingClientRect();
+      const items: MenuItem[] = api.desktop ? [{ label: root, run: () => {} }] : [{ label: "Browser preview: sheets live in this browser only", run: () => {} }];
+      if (!api.desktop) {
+        /* nothing to choose in the browser */
+      } else if (locked) items.push({ label: "The folder is fixed by SCRIPTORIUM_LIBRARY", run: () => {} });
+      else {
+        items.push({
+          label: "Choose library folder…",
+          sep: true,
+          run: async () => {
+            await flushSave();
+            try {
+              if (await api.chooseLibrary()) location.reload();
+            } catch (e) {
+              toast(msg(e));
+            }
+          },
+        });
+      }
+      showMenu(r.left + 8, r.top - 44 - items.length * 30, items);
+    });
+  }
+
   // -------- search
   let searchTimer = 0;
   searchEl.addEventListener("input", () => {
@@ -1128,7 +1328,12 @@ async function main(): Promise<void> {
   // -------- start
   setHasNone(true);
   updateStats();
-  S.meta = parseMeta(await api.readMeta().catch(() => ""));
+  const metaText = await api.readMeta().catch(() => "");
+  S.meta = parseMeta(metaText);
+  metaBase = parseMeta(metaText);
+  await recoverDraft();
+  void initLibraryButton();
+  lastStamp = await api.stamp().catch(() => "");
   await refresh();
   // Open the most recent sheet so the app starts in your writing, not an empty room.
   if (S.sheets[0]) await openSheet(S.sheets[0].path);
