@@ -170,6 +170,7 @@ export interface MenuItem {
   sep?: boolean;
 }
 export function showMenu(x: number, y: number, items: MenuItem[]): void {
+  if (!items.length) return;
   document.querySelector(".menu")?.remove();
   const menu = h("div", { class: "menu", role: "menu" });
   for (const it of items) {

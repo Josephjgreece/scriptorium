@@ -2,7 +2,7 @@
 <html lang="en" data-theme="auto">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Scriptorium</title>
   </head>
   <body>
@@ -10,22 +10,25 @@
       <!-- toolbar row: one bar across the window, its sections lined up over the panes -->
       <header class="tb tb-lib">
         <button class="icon-btn" id="btnSidebar" title="Hide sidebar (Ctrl/Cmd+\)" aria-label="Toggle sidebar"></button>
+        <span class="tb-title only-narrow">Scriptorium</span>
         <span class="tb-grow"></span>
-        <button class="icon-btn" id="btnNewGroup" title="New group (Ctrl/Cmd+Shift+N)" aria-label="New group"></button>
+        <button class="icon-btn edit-only" id="btnNewGroup" title="New group (Ctrl/Cmd+Shift+N)" aria-label="New group"></button>
       </header>
       <div class="split" id="split1" role="separator" aria-orientation="vertical"></div>
       <header class="tb tb-list">
+        <button class="icon-btn only-narrow" id="btnBackLib" title="Back to the library" aria-label="Back to the library"></button>
         <button class="icon-btn only-collapsed" id="btnSidebar2" title="Show sidebar (Ctrl/Cmd+\)" aria-label="Show sidebar"></button>
         <input id="search" type="search" placeholder="Search library" aria-label="Search library" spellcheck="false" />
-        <button class="icon-btn" id="btnNewSheet" title="New sheet (Ctrl/Cmd+N)" aria-label="New sheet"></button>
+        <button class="icon-btn edit-only" id="btnNewSheet" title="New sheet (Ctrl/Cmd+N)" aria-label="New sheet"></button>
       </header>
       <div class="split" id="split2" role="separator" aria-orientation="vertical"></div>
       <header class="tb tb-ed">
+        <button class="icon-btn only-narrow" id="btnBackList" title="Back to the sheets" aria-label="Back to the sheets"></button>
         <div class="ed-crumb" id="edCrumb"></div>
         <div class="ed-tools">
           <button class="icon-btn" id="btnNavigator" title="Navigator: headings (Ctrl/Cmd+Shift+O)" aria-label="Navigator"></button>
           <button class="icon-btn" id="btnAppearance" title="Appearance and writing options (Ctrl/Cmd+,)" aria-label="Appearance"></button>
-          <button class="icon-btn" id="btnTypewriter" title="Typewriter mode (Ctrl/Cmd+Shift+T)" aria-label="Typewriter mode"></button>
+          <button class="icon-btn edit-only" id="btnTypewriter" title="Typewriter mode (Ctrl/Cmd+Shift+T)" aria-label="Typewriter mode"></button>
           <button class="icon-btn" id="btnTheme" title="Theme (Ctrl/Cmd+Shift+D)" aria-label="Switch theme"></button>
           <button class="icon-btn" id="btnExport" title="Export sheet (Ctrl/Cmd+Shift+E)" aria-label="Export sheet"></button>
           <button class="icon-btn" id="btnFocus" title="Focus mode (Ctrl/Cmd+Shift+F)" aria-label="Focus mode"></button>
@@ -53,7 +56,7 @@
         <div class="editor" id="editor"></div>
         <div class="empty" id="empty">
           <p>Pick a sheet, or start a new one.</p>
-          <button class="btn" id="btnEmptyNew">New sheet</button>
+          <button class="btn edit-only" id="btnEmptyNew">New sheet</button>
         </div>
         <footer class="status" id="status">
           <span id="stWords" class="stat-link" title="Statistics" role="button" tabindex="0">0 words</span>

@@ -19,7 +19,7 @@ A writing app can't lose text, and a synced folder makes that harder.
 | Item | Status |
 |---|---|
 | Desktop app built in CI | Windows x64 + ARM64 installers (`windows-build.yml`); Linux and macOS compile, test and run the browser tests (`ci.yml`). macOS and Linux installers come with Phase 6 |
-| Tests | 70 unit tests (structure model, merge, projects, text, typing, appearance) (`npm test`), 23 Rust tests, 26 browser end-to-end scenarios (`npm run test:e2e`) |
+| Tests | 78 unit tests (structure model, merge, projects, text, typing, appearance, phone panes) (`npm test`), 26 Rust tests, 30 browser end-to-end scenarios (`npm run test:e2e`) |
 | Atomic sheet writes | Done: temp file, then rename |
 | Save-failure recovery | Done: retries every 5 s, text stashed and recovered as a copy on next start, warning before closing with unsaved text |
 | File watcher | Done: reloads the open sheet and the lists when files change outside the app (polling a cheap fingerprint every 2.5 s and on window focus) |
@@ -86,6 +86,15 @@ Ulysses calls this layer **Projects** (introduced in Ulysses 29, extended since,
 - Signed installers, auto-update, `.md` file association (M)
 - Onboarding: a welcome library in the style of the Ulysses "First Steps" sheets (S)
 - Accessibility and localisation pass (M)
+
+## Android (reading only)
+
+A read-only phone app, built early because reading your sheets on a phone was wanted before anything else.
+
+- **Built and checked here:** the app compiles for Android (a signed release APK builds from `src-tauri/gen/android`); the Rust backend refuses every write in read-only mode (tested); the one-pane-at-a-time phone layout, Back button behaviour, hidden editing controls, bare menus and the "can't see your files" screen are covered by browser tests at phone size; the library status check is tested
+- **Not checked:** running on a phone. There is no emulator here, so the APK has not been installed anywhere. The permission screen's wording (where "All files access" lives in Settings) and whether the app can then read `Documents/Scriptorium` need a real phone, and I expect to adjust them after the first try
+- **Needs doing on the first try:** a button that opens the "All files access" settings page directly (needs a few lines of Android code), instead of describing the path
+- **Later, if wanted:** editing on the phone (writes, conflicts, a proper keyboard layout), the Storage Access Framework instead of "All files access" for Play Store distribution, and export
 
 ## Sync
 

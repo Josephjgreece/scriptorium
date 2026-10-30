@@ -1,11 +1,12 @@
 import "./styles.css";
-import { loadApi, type Api, type Group, type SearchHit, type SheetInfo, type TrashItem } from "./api";
+import { loadApi, type Api, type Group, type LibraryStatus, type SearchHit, type SheetInfo, type TrashItem } from "./api";
 import { addComment, createEditor, insertFootnote, jumpTo, makeState } from "./editor";
 import { applyAppearance, buildAppearancePanel, parseAppearance, THEMES, type Appearance } from "./appearance";
 import { buildNavigator, buildStats, navEntries } from "./panels";
 import { countWords, parseHeadings, stripComments, textStats } from "./text";
 import { countsTowardGoal, deadlineText, goalText, isMaterialPath, orderedSheets, progress, projectOf, projectSheets, roleOf, TEMPLATES } from "./projects";
 import { askNewProject, askProjectSettings, ROLE_LABEL } from "./projectsUi";
+import { isForward, NARROW_QUERY, paneFromState, previousPane, setupNotice, stepsTo, type Pane } from "./panes";
 import { askConfirm, askText, el, GROUP_COLORS, GROUP_ICONS, h, icon, ls, lsSet, closePopover, modal, msg, showMenu, toast, togglePopover, whenText, type MenuItem } from "./ui";
 import { arrangeGroups, dropFromMeta, emptyMeta, glueOf, GLUE_JOIN, mergeMeta, parentOf, parseMeta, remapMeta, type Filter, type Meta, type SectionRole } from "./meta";
 
@@ -40,6 +41,13 @@ async function main(): Promise<void> {
     typewriter: ls("typewriter") === "1",
     appearance: parseAppearance(ls("appearance"), ls("theme")) as Appearance,
     noLib: ls("noLib") === "1",
+    /** the phone app only reads: nothing may be changed */
+    readOnly: false,
+    /** Pandoc (export) is available */
+    canExport: true,
+    /** a phone-sized window: one pane at a time */
+    narrow: false,
+    pane: "lib" as Pane,
     /** the project the sidebar is focused on (see "Projects"), or null for the whole library */
     project: (ls("project") || null) as string | null,
     collapsed: new Set<string>(safeJson(ls("collapsed"))),
@@ -54,6 +62,9 @@ async function main(): Promise<void> {
     }
   }
 
+  // a first run on a phone starts with text sized for a small screen (a saved choice is never overridden)
+  if (ls("appearance") === null && window.matchMedia(NARROW_QUERY).matches) S.appearance = { ...S.appearance, size: 18, line: 1.7 };
+
   const treeEl = el("tree");
   const sheetsEl = el("sheets");
   const listTitle = el("listTitle");
@@ -63,7 +74,7 @@ async function main(): Promise<void> {
   // -------- editor
   const view = createEditor(el("editor"));
   const hooks = { onChange: onDocChanged, isTypewriter: () => S.typewriter, smartTypography: () => S.appearance.typography, onSelection: () => updateStats() };
-  const setDoc = (text: string, glued = false, readOnly = false) => view.setState(makeState(text, hooks, glued, readOnly));
+  const setDoc = (text: string, glued = false, readOnly = S.readOnly) => view.setState(makeState(text, hooks, glued, readOnly));
   setDoc("");
 
   // -------- icons on static buttons
@@ -166,6 +177,10 @@ async function main(): Promise<void> {
     document.body.classList.toggle("has-none", none);
   }
 
+  function deny(): void {
+    toast("Scriptorium only reads on this device");
+  }
+
   // -------- structure metadata (order, material, glue, filters)
   // `metaBase` is the last structure both this app and the disk agreed on. Writing merges it with
   // whatever another device saved in the meantime, so synced devices don't overwrite each other.
@@ -180,6 +195,7 @@ async function main(): Promise<void> {
     metaBase = parseMeta(json(S.meta));
   }
   function persistMeta(): void {
+    if (S.readOnly) return;
     const before = json(S.meta);
     metaChain = metaChain
       .then(mergeAndWrite)
@@ -329,6 +345,7 @@ async function main(): Promise<void> {
 
   /** On start-up: text stashed because it couldn't be saved becomes a copy beside its sheet. */
   async function recoverDraft(): Promise<void> {
+    if (S.readOnly) return;
     const raw = ls(DRAFT_KEY);
     if (!raw) return;
     try {
@@ -443,7 +460,7 @@ async function main(): Promise<void> {
         "data-nav": "group",
         "data-gpath": g.path,
         "data-kids": g.children.length ? "1" : null,
-        draggable: isRoot ? null : "true",
+        draggable: isRoot || S.readOnly ? null : "true",
         onclick: () => void selectView({ kind: "group", path: g.path }),
       },
       chev,
@@ -521,15 +538,15 @@ async function main(): Promise<void> {
     treeEl.append(h("div", { class: "tree-label" }, "Library"), smartRow("all", "all", "All"), smartRow("recent", "clock", "Last 7 Days"));
     // only shown when a sync service has left conflicted copies behind
     const conflicts = S.all.filter((x) => x.conflict).length;
-    if (conflicts || S.view.kind === "conflicts") treeEl.append(smartRow("conflicts", "warn", "Conflicts", conflicts));
-    treeEl.append(smartRow("trash", "trash", "Trash", S.trash.length));
+    if (!S.readOnly && (conflicts || S.view.kind === "conflicts")) treeEl.append(smartRow("conflicts", "warn", "Conflicts", conflicts));
+    if (!S.readOnly) treeEl.append(smartRow("trash", "trash", "Trash", S.trash.length));
 
     treeEl.append(
       h(
         "div",
         { class: "tree-label with-btn" },
         h("span", {}, "Filters"),
-        h("button", { class: "icon-btn mini", title: "New filter", "aria-label": "New filter", onclick: () => void newFilter() }, icon("plus")),
+        h("button", { class: "icon-btn mini edit-only", title: "New filter", "aria-label": "New filter", onclick: () => void newFilter() }, icon("plus")),
       ),
     );
     if (!S.meta.filters.length) treeEl.append(h("div", { class: "tree-hint" }, "Smart folders: save a search to keep it here."));
@@ -543,6 +560,7 @@ async function main(): Promise<void> {
       );
       row.addEventListener("contextmenu", (e) => {
         e.preventDefault();
+        if (S.readOnly) return;
         showMenu(e.clientX, e.clientY, [
           { label: "Edit filter…", run: () => void editFilter(f) },
           { label: "Delete filter", run: () => void deleteFilter(f), danger: true, sep: true },
@@ -556,7 +574,7 @@ async function main(): Promise<void> {
         "div",
         { class: "tree-label with-btn" },
         h("span", {}, "Projects"),
-        h("button", { class: "icon-btn mini", title: "New project", "aria-label": "New project", onclick: () => void createProject() }, icon("plus")),
+        h("button", { class: "icon-btn mini edit-only", title: "New project", "aria-label": "New project", onclick: () => void createProject() }, icon("plus")),
       ),
     );
     const projects = Object.keys(S.meta.projects).filter((p) => findGroup(S.tree, p));
@@ -564,7 +582,7 @@ async function main(): Promise<void> {
     for (const path of projects) treeEl.append(projectRow(path));
 
     // Loose sheets in the library folder live in the Inbox, like Ulysses.
-    treeEl.append(h("div", { class: "tree-label" }, "On this computer"), rowFor(S.tree, 0, "Inbox", "inbox"));
+    treeEl.append(h("div", { class: "tree-label" }, "On this device"), rowFor(S.tree, 0, "Inbox", "inbox"));
     const addGroup = (g: Group, depth: number): void => {
       if (S.meta.projects[g.path]) return; // projects live under Projects
       const [ico, colour] = (S.meta.style[g.path] ?? "").split(":");
@@ -587,6 +605,7 @@ async function main(): Promise<void> {
 
   /** Move a group next to another (before / after) or inside it, keeping everything that refers to it in step. */
   async function moveGroup(src: string, target: Group, zone: "before" | "after" | "into"): Promise<void> {
+    if (S.readOnly) return deny();
     if (src === target.path || target.path.startsWith(src + "/")) return;
     const dest = zone === "into" ? target.path : parentOf(target.path);
     await flushSave();
@@ -612,6 +631,7 @@ async function main(): Promise<void> {
   }
 
   async function askGroupStyle(g: Group): Promise<void> {
+    if (S.readOnly) return deny();
     const [curIcon, curColor] = (S.meta.style[g.path] ?? "doc:").split(":");
     let pickIcon = GROUP_ICONS.includes(curIcon) ? curIcon : "doc";
     let pickColor = GROUP_COLORS[curColor] ? curColor : "";
@@ -711,7 +731,7 @@ async function main(): Promise<void> {
         "div",
         { class: "tree-label with-btn" },
         h("span", {}, "Sections"),
-        h("button", { class: "icon-btn mini", title: "New section", "aria-label": "New section", onclick: () => void newGroup(path) }, icon("plus")),
+        h("button", { class: "icon-btn mini edit-only", title: "New section", "aria-label": "New section", onclick: () => void newGroup(path) }, icon("plus")),
       ),
     );
     if (!node.children.length) treeEl.append(h("div", { class: "tree-hint" }, "Add a group for each part: chapters, notes, research."));
@@ -736,10 +756,11 @@ async function main(): Promise<void> {
   async function leaveProject(): Promise<void> {
     S.project = null;
     lsSet("project", "");
-    await selectView({ kind: "group", path: "" });
+    await selectView({ kind: "group", path: "" }, false);
   }
 
   async function createProject(): Promise<void> {
+    if (S.readOnly) return deny();
     const r = await askNewProject();
     if (!r) return;
     const tpl = TEMPLATES.find((t) => t.id === r.template) ?? TEMPLATES[TEMPLATES.length - 1];
@@ -772,6 +793,7 @@ async function main(): Promise<void> {
   }
 
   async function makeProject(g: Group): Promise<void> {
+    if (S.readOnly) return deny();
     S.meta.projects[g.path] = { template: "", goal: 0, deadline: "", sections: {} };
     persistMeta();
     await enterProject(g.path);
@@ -779,6 +801,7 @@ async function main(): Promise<void> {
   }
 
   async function stopProject(path: string): Promise<void> {
+    if (S.readOnly) return deny();
     const ok = await askConfirm(`Stop “${nameOf(path)}” being a project?`, "Its sheets and groups stay exactly as they are. Only the goal, deadline and section types are forgotten.", "Stop being a project");
     if (!ok) return;
     delete S.meta.projects[path];
@@ -788,6 +811,7 @@ async function main(): Promise<void> {
   }
 
   async function projectSettings(path: string): Promise<void> {
+    if (S.readOnly) return deny();
     const proj = S.meta.projects[path];
     const node = findGroup(S.tree, path);
     if (!proj || !node) return;
@@ -824,6 +848,7 @@ async function main(): Promise<void> {
   }
 
   async function setSectionRole(g: Group, role: SectionRole): Promise<void> {
+    if (S.readOnly) return deny();
     const proj = S.meta.projects[parentOf(g.path)];
     if (!proj) return;
     if (role === "manuscript") delete proj.sections[g.path];
@@ -834,6 +859,7 @@ async function main(): Promise<void> {
   }
 
   function projectMenu(path: string): MenuItem[] {
+    if (S.readOnly) return [];
     const g = findGroup(S.tree, path);
     return [
       { label: "Project settings…", run: () => void projectSettings(path) },
@@ -846,6 +872,7 @@ async function main(): Promise<void> {
   }
 
   function groupMenu(g: Group): MenuItem[] {
+    if (S.readOnly) return [];
     const inProject = projectOf(S.meta, g.path);
     const isProject = !!S.meta.projects[g.path];
     if (isProject) return projectMenu(g.path);
@@ -869,7 +896,8 @@ async function main(): Promise<void> {
     return items;
   }
 
-  async function selectView(v: View): Promise<void> {
+  async function selectView(v: View, toList = true): Promise<void> {
+    if (toList) goPane("list");
     if (S.trashPreview && v.kind !== "trash") leaveTrashPreview();
     S.view = v;
     searchEl.value = "";
@@ -924,7 +952,7 @@ async function main(): Promise<void> {
     if (S.hits) {
       listTitle.append(
         h("span", { class: "lt-name" }, plural(S.hits.length, "result")),
-        h("button", { class: "lt-btn", onclick: () => void newFilter({ query: searchEl.value.trim() }) }, "Save as filter"),
+        h("button", { class: "lt-btn edit-only", onclick: () => void newFilter({ query: searchEl.value.trim() }) }, "Save as filter"),
       );
       if (!S.hits.length) sheetsEl.append(h("div", { class: "none" }, "Nothing found."));
       for (const hit of S.hits) sheetsEl.append(hitRow(hit));
@@ -933,7 +961,7 @@ async function main(): Promise<void> {
     const v = S.view;
     if (v.kind === "trash") {
       listTitle.append(h("span", { class: "lt-name" }, "Trash"));
-      if (S.trash.length) listTitle.append(h("button", { class: "lt-btn danger", onclick: () => void emptyTrashAll() }, "Empty Trash"));
+      if (S.trash.length) listTitle.append(h("button", { class: "lt-btn danger edit-only", onclick: () => void emptyTrashAll() }, "Empty Trash"));
       if (!S.trash.length) sheetsEl.append(h("div", { class: "none" }, "The Trash is empty."));
       for (const t of S.trash) sheetsEl.append(trashRow(t));
       return;
@@ -988,7 +1016,7 @@ async function main(): Promise<void> {
     const badge = conflict ? icon("warn") : mat ? icon("torn") : glued ? icon("glue") : null;
     const row = h(
       "div",
-      { class: "sheet-item" + (S.sel.has(u.key) ? " selected" : "") + (mat ? " material" : "") + (glued ? " glued" : "") + (conflict ? " conflict" : ""), draggable: "true", "data-key": u.key },
+      { class: "sheet-item" + (S.sel.has(u.key) ? " selected" : "") + (mat ? " material" : "") + (glued ? " glued" : "") + (conflict ? " conflict" : ""), draggable: S.readOnly ? null : "true", "data-key": u.key },
       h("div", { class: "si-head" }, h("div", { class: "si-title" }, first.title || "Untitled"), badge ? h("span", { class: "si-badge" }, badge) : null),
       h("div", { class: "si-prev" }, first.preview),
       h("div", { class: "si-meta" }, meta),
@@ -1037,18 +1065,15 @@ async function main(): Promise<void> {
   function hitRow(hit: SearchHit): HTMLElement {
     const row = h(
       "div",
-      { class: "sheet-item" + (isOpen(hit.path) ? " selected" : ""), "data-path": hit.path, onclick: () => void openSheet(hit.path) },
+      { class: "sheet-item" + (isOpen(hit.path) ? " selected" : ""), "data-path": hit.path, onclick: () => (goPane("ed"), void openSheet(hit.path)) },
       h("div", { class: "si-head" }, h("div", { class: "si-title" }, hit.title || "Untitled")),
       h("div", { class: "si-prev" }, hit.snippet),
       h("div", { class: "si-meta" }, groupOf(hit.path)),
     );
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      showMenu(e.clientX, e.clientY, [
-        { label: "Open", run: () => void openSheet(hit.path) },
-        { label: "Export…", run: () => void exportSheet(hit.path) },
-        { label: "Delete sheet", run: () => void deleteSheets([hit.path]), danger: true, sep: true },
-      ]);
+      const open: MenuItem = { label: "Open", run: () => void openSheet(hit.path) };
+      showMenu(e.clientX, e.clientY, S.readOnly ? [open] : [open, { label: "Export…", run: () => void exportSheet(hit.path) }, { label: "Delete sheet", run: () => void deleteSheets([hit.path]), danger: true, sep: true }]);
     });
     return row;
   }
@@ -1070,6 +1095,7 @@ async function main(): Promise<void> {
         return;
       }
     }
+    goPane("ed");
     void openSheet(u.paths[0]);
   }
 
@@ -1085,6 +1111,7 @@ async function main(): Promise<void> {
     const allMaterial = paths.every((p) => S.meta.material.includes(p));
     const fromSection = paths.every((p) => roleOf(S.meta, p) === "material");
     const items: MenuItem[] = [{ label: "Open", run: () => void openSheet(u.paths[0]) }];
+    if (S.readOnly) return items;
     const copy = targets.length === 1 && u.sheets[0].conflict ? u.sheets[0] : null;
     if (copy?.original) {
       items.push(
@@ -1097,7 +1124,7 @@ async function main(): Promise<void> {
     if (targets.length === 1 && u.paths.length > 1) items.push({ label: "Unglue sheets", run: () => void unglue(u) });
     if (targets.length === 1 && u.paths.length === 1) items.push({ label: "Rename file…", run: () => void renameSheet(u.paths[0]) });
     if (!fromSection) items.push({ label: allMaterial ? "Remove material mark" : "Mark as material", run: () => void setMaterial(paths, !allMaterial) });
-    if (targets.length === 1) items.push({ label: "Export…", run: () => void exportSheet(u.paths[0]) });
+    if (targets.length === 1 && S.canExport) items.push({ label: "Export…", run: () => void exportSheet(u.paths[0]) });
     items.push(
       { label: "Move to Inbox", run: () => void moveTo(paths, "") },
       { label: paths.length > 1 ? `Delete ${paths.length} sheets` : "Delete sheet", run: () => void deleteSheets(paths), danger: true, sep: true },
@@ -1107,6 +1134,7 @@ async function main(): Promise<void> {
 
   // -------- material, glue, order
   async function setMaterial(paths: string[], on: boolean): Promise<void> {
+    if (S.readOnly) return deny();
     if (on && paths.some((p) => glueOf(S.meta, p))) {
       toast("Unglue these sheets before marking them as material");
       return;
@@ -1129,6 +1157,7 @@ async function main(): Promise<void> {
   }
 
   async function glueUnits(targets: Unit[]): Promise<void> {
+    if (S.readOnly) return deny();
     await flushSave();
     const paths = targets.flatMap((t) => t.paths);
     S.meta.glue = S.meta.glue.filter((g) => !g.some((p) => paths.includes(p)));
@@ -1140,6 +1169,7 @@ async function main(): Promise<void> {
   }
 
   async function unglue(u: Unit): Promise<void> {
+    if (S.readOnly) return deny();
     await flushSave();
     S.meta.glue = S.meta.glue.filter((g) => g[0] !== u.paths[0]);
     persistMeta();
@@ -1148,6 +1178,7 @@ async function main(): Promise<void> {
   }
 
   async function reorder(targetKey: string, before: boolean): Promise<void> {
+    if (S.readOnly) return deny();
     const moving = units.filter((x) => dragKeys.includes(x.key));
     const rest = units.filter((x) => !dragKeys.includes(x.key));
     const i = rest.findIndex((x) => x.key === targetKey);
@@ -1206,6 +1237,7 @@ async function main(): Promise<void> {
 
   // -------- actions
   async function newSheetIn(group: string): Promise<void> {
+    if (S.readOnly) return deny();
     await flushSave();
     try {
       searchEl.value = "";
@@ -1227,6 +1259,7 @@ async function main(): Promise<void> {
   const newSheet = () => newSheetIn(viewGroupPath());
 
   async function newGroup(parent = viewGroupPath()): Promise<void> {
+    if (S.readOnly) return deny();
     const name = await askText("New group", "", "Create");
     if (!name) return;
     try {
@@ -1240,6 +1273,7 @@ async function main(): Promise<void> {
   }
 
   async function renameGroup(g: Group): Promise<void> {
+    if (S.readOnly) return deny();
     const name = await askText("Rename group", g.name, "Rename");
     if (!name || name === g.name) return;
     await flushSave();
@@ -1253,6 +1287,7 @@ async function main(): Promise<void> {
   }
 
   async function renameSheet(path: string): Promise<void> {
+    if (S.readOnly) return deny();
     const stem = (path.split("/").pop() ?? "").replace(/\.md$/i, "");
     const name = await askText("Rename file", stem, "Rename");
     if (!name || name === stem) return;
@@ -1280,6 +1315,7 @@ async function main(): Promise<void> {
   }
 
   async function deleteGroup(g: Group): Promise<void> {
+    if (S.readOnly) return deny();
     const ok = await askConfirm(`Delete “${g.name}”?`, "The group and everything in it moves to the Trash, so you can restore it later.", "Delete");
     if (!ok) return;
     await flushSave();
@@ -1294,6 +1330,7 @@ async function main(): Promise<void> {
   }
 
   async function deleteSheets(paths: string[]): Promise<void> {
+    if (S.readOnly) return deny();
     await flushSave();
     try {
       for (const p of paths) await api.deleteItem(p);
@@ -1307,6 +1344,7 @@ async function main(): Promise<void> {
   }
 
   async function moveTo(paths: string[], group: string): Promise<void> {
+    if (S.readOnly) return deny();
     await flushSave();
     const moved = new Map<string, string>();
     try {
@@ -1374,6 +1412,7 @@ async function main(): Promise<void> {
   }
 
   async function restoreTrashItem(t: TrashItem): Promise<void> {
+    if (S.readOnly) return deny();
     try {
       const np = await api.restoreTrash(t.id);
       if (S.trashPreview === t.id) leaveTrashPreview();
@@ -1390,6 +1429,7 @@ async function main(): Promise<void> {
   }
 
   async function purgeTrashItem(t: TrashItem): Promise<void> {
+    if (S.readOnly) return deny();
     const ok = await askConfirm(`Delete “${t.title}” permanently?`, "It will be gone for good. This can't be undone.", "Delete permanently");
     if (!ok) return;
     try {
@@ -1403,6 +1443,7 @@ async function main(): Promise<void> {
   }
 
   async function emptyTrashAll(): Promise<void> {
+    if (S.readOnly) return deny();
     const n = S.trash.length;
     if (!n) return;
     const ok = await askConfirm("Empty the Trash?", `${plural(n, "item")} will be deleted for good. This can't be undone.`, "Empty Trash");
@@ -1427,6 +1468,7 @@ async function main(): Promise<void> {
   });
 
   async function settleConflict(path: string, keepCopy: boolean): Promise<void> {
+    if (S.readOnly) return deny();
     await flushSave();
     try {
       const survivor = await api.resolveConflict(path, keepCopy);
@@ -1443,6 +1485,7 @@ async function main(): Promise<void> {
   const titleOf = (path: string): string => S.sheets.find((x) => x.path === path)?.title ?? (path.split("/").pop() ?? "Sheet").replace(/\.md$/i, "");
 
   async function exportSheet(path = S.current ?? ""): Promise<void> {
+    if (!S.canExport) return toast("Export isn't available on this device");
     if (!path) return;
     await flushSave();
     try {
@@ -1458,6 +1501,7 @@ async function main(): Promise<void> {
 
   /** A whole group as one document, in the order you arranged it. Material sheets are left out. */
   async function exportGroup(g: Group): Promise<void> {
+    if (!S.canExport) return toast("Export isn't available on this device");
     await flushSave();
     try {
       const parts: string[] = [];
@@ -1530,6 +1574,7 @@ async function main(): Promise<void> {
   }
 
   async function newFilter(init: Partial<Filter> = {}): Promise<void> {
+    if (S.readOnly) return deny();
     const f = await askFilter(init, "New filter", "Create");
     if (!f) return;
     const filter: Filter = { ...f, id: `f${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` };
@@ -1539,6 +1584,7 @@ async function main(): Promise<void> {
   }
 
   async function editFilter(f: Filter): Promise<void> {
+    if (S.readOnly) return deny();
     const next = await askFilter(f, "Edit filter", "Save");
     if (!next) return;
     Object.assign(f, next);
@@ -1547,6 +1593,7 @@ async function main(): Promise<void> {
   }
 
   async function deleteFilter(f: Filter): Promise<void> {
+    if (S.readOnly) return deny();
     S.meta.filters = S.meta.filters.filter((x) => x.id !== f.id);
     persistMeta();
     if (S.view.kind === "filter" && S.view.id === f.id) S.view = { kind: "group", path: "" };
@@ -1611,6 +1658,7 @@ async function main(): Promise<void> {
           sep: true,
           run: async () => {
             await flushSave();
+            if (typedFolder) return void useTypedFolder(root);
             try {
               if (await api.chooseLibrary()) location.reload();
             } catch (e) {
@@ -1636,6 +1684,7 @@ async function main(): Promise<void> {
     }
     if (S.view.kind !== "group" || S.view.path !== parentOf(path)) S.view = { kind: "group", path: parentOf(path) };
     await refresh();
+    goPane("ed");
     await openSheet(path);
   }
 
@@ -1898,7 +1947,95 @@ async function main(): Promise<void> {
   initSplit("split1", "--w-lib", 160, 420);
   initSplit("split2", "--w-list", 220, 560);
 
+  // -------- phone layout: one pane at a time
+  const narrowQuery = window.matchMedia(NARROW_QUERY);
+
+  function setPane(p: Pane): void {
+    S.pane = p;
+    document.body.dataset.pane = p;
+  }
+
+  /** Move to a pane. Steps forward are recorded in the browser history so the Android Back button retraces them. */
+  function goPane(p: Pane): void {
+    if (!S.narrow || p === S.pane) return;
+    for (const step of stepsTo(S.pane, p)) history.pushState({ pane: step }, "");
+    setPane(p);
+  }
+
+  function paneBack(): void {
+    const prev = previousPane(S.pane);
+    if (!prev) return;
+    if (isForward(prev, S.pane) && history.state && paneFromState(history.state) === S.pane) history.back();
+    else setPane(prev);
+  }
+
+  function applyNarrow(): void {
+    S.narrow = narrowQuery.matches;
+    document.body.classList.toggle("narrow", S.narrow);
+    if (S.narrow) history.replaceState({ pane: S.pane }, "");
+    setPane(S.pane);
+  }
+  narrowQuery.addEventListener("change", applyNarrow);
+  window.addEventListener("popstate", (e) => {
+    if (S.narrow) setPane(paneFromState(e.state));
+  });
+  el("btnBackLib").append(icon("chev"));
+  el("btnBackList").append(icon("chev"));
+  el("btnBackLib").addEventListener("click", paneBack);
+  el("btnBackList").addEventListener("click", paneBack);
+  applyNarrow();
+
+  // -------- first run: the library can't be seen yet (Android asks for file access)
+  const typedFolder = /Android/i.test(navigator.userAgent);
+
+  async function useTypedFolder(current: string): Promise<void> {
+    const path = await askText("Library folder", current, "Use this folder");
+    if (!path) return;
+    try {
+      await api.setLibrary(path);
+      location.reload();
+    } catch (e) {
+      toast(msg(e));
+    }
+  }
+
+  function showSetup(status: LibraryStatus): void {
+    const notice = setupNotice(status);
+    document.getElementById("setup")?.remove();
+    if (!notice) return;
+    document.body.append(
+      h(
+        "div",
+        { class: "setup", id: "setup", role: "dialog", "aria-label": notice.title },
+        h(
+          "div",
+          { class: "setup-card" },
+          h("h2", {}, notice.title),
+          ...notice.lines.map((l) => h("p", {}, l)),
+          h(
+            "div",
+            { class: "actions" },
+            h("button", { class: "btn", onclick: () => void useTypedFolder(status.path) }, "Use a different folder…"),
+            h("button", { class: "btn primary", onclick: () => location.reload() }, "Check again"),
+          ),
+        ),
+      ),
+    );
+  }
+
   // -------- start
+  const status = await api.libraryStatus().catch(() => null);
+  if (status) {
+    S.readOnly = status.readOnly;
+    S.canExport = status.canExport;
+  }
+  document.body.classList.toggle("read-only", S.readOnly);
+  document.body.classList.toggle("no-export", !S.canExport);
+  if (S.readOnly) {
+    const hint = el("empty").querySelector("p");
+    if (hint) hint.textContent = "Pick a sheet to read.";
+  }
+  if (status) showSetup(status);
   setHasNone(true);
   updateStats();
   const metaText = await api.readMeta().catch(() => "");

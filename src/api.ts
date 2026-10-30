@@ -40,6 +40,21 @@ export interface SearchHit {
   snippet: string;
 }
 
+/** What the app can see at the library folder, and what it may do there. */
+export interface LibraryStatus {
+  path: string;
+  /** nothing may be written (the phone app only reads) */
+  readOnly: boolean;
+  locked: boolean;
+  /** Pandoc, and so export, isn't available (phones) */
+  canExport: boolean;
+  exists: boolean;
+  readable: boolean;
+  /** the system refused access, as Android does until "All files access" is allowed */
+  denied: boolean;
+  sheets: number;
+}
+
 export interface Api {
   readonly desktop: boolean;
   libraryRoot(): Promise<string>;
@@ -63,6 +78,9 @@ export interface Api {
   restoreTrash(id: string): Promise<string>;
   purgeTrash(id: string): Promise<void>;
   emptyTrash(): Promise<number>;
+  libraryStatus(): Promise<LibraryStatus>;
+  /** Use this folder (typed, where there is no folder picker); returns the path now in use. */
+  setLibrary(path: string): Promise<string>;
   /** True when the library folder is fixed by the SCRIPTORIUM_LIBRARY environment variable. */
   libraryLocked(): Promise<boolean>;
   /** Ask for a folder and switch to it; returns its path, or null if cancelled. */
@@ -116,6 +134,8 @@ async function tauriApi(): Promise<Api> {
     purgeTrash: (id) => invoke("purge_trash", { id }),
     emptyTrash: () => invoke("empty_trash"),
     libraryLocked: () => invoke("library_locked"),
+    libraryStatus: () => invoke("library_status"),
+    setLibrary: (path) => invoke("set_library", { path }),
     async chooseLibrary() {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const dir = await open({ directory: true, multiple: false, title: "Choose library folder" });
@@ -206,6 +226,10 @@ const WELCOME =
   "- Ctrl/Cmd+Shift+T: typewriter mode\n- Ctrl/Cmd+Shift+F: focus mode\n- Ctrl/Cmd+Shift+D: theme\n";
 
 function webApi(): Api {
+  // ?readonly makes the preview behave like the phone app; ?denied also hides the folder, as Android does until allowed
+  const query = new URLSearchParams(typeof location === "undefined" ? "" : location.search);
+  const readOnly = query.has("readonly") || query.has("denied");
+  const denied = query.has("denied");
   let store: MockStore;
   try {
     store = JSON.parse(localStorage.getItem(KEY) ?? "") as MockStore;
@@ -256,7 +280,7 @@ function webApi(): Api {
   });
   const fail = (m: string) => Promise.reject(new Error(m));
 
-  return {
+  const api: Api = {
     desktop: false,
     libraryRoot: async () => "Browser preview (stored in this browser)",
     listTree: async () => {
@@ -434,6 +458,11 @@ function webApi(): Api {
       return download(content, suggestedName);
     },
     libraryLocked: async () => false,
+    libraryStatus: async () => {
+      reload();
+      return { path: "Browser preview", readOnly, locked: false, canExport: true, exists: !denied, readable: !denied, denied, sheets: denied ? 0 : Object.keys(store.files).length };
+    },
+    setLibrary: async (path) => path,
     chooseLibrary: async () => null,
     stamp: async () => {
       reload();
@@ -462,6 +491,23 @@ function webApi(): Api {
       }
     },
   };
+
+  if (denied) {
+    // the folder can't be seen at all
+    const nothing = () => Promise.reject(new Error("Permission denied"));
+    api.listTree = async () => ({ name: "Library", path: "", count: 0, children: [] });
+    api.listSheets = async () => [];
+    api.listTrash = async () => [];
+    api.readSheet = nothing;
+  }
+  if (readOnly) {
+    // mirror the Rust side: every command that changes anything refuses
+    const refuse = () => Promise.reject(new Error("Scriptorium is read-only on this device"));
+    for (const name of ["writeSheet", "createSheet", "createGroup", "renameItem", "deleteItem", "moveItem", "restoreTrash", "purgeTrash", "emptyTrash", "resolveConflict", "saveConflictCopy", "writeMeta"] as const) {
+      (api as unknown as Record<string, unknown>)[name] = refuse;
+    }
+  }
+  return api;
 }
 
 export async function loadApi(): Promise<Api> {

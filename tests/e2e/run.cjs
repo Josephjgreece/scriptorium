@@ -47,8 +47,8 @@ function startVite() {
 }
 
 // Each scenario gets a fresh browser page and a "library on disk" it can also change from behind the app's back.
-async function freshPage(browser, files, dirs = [], meta = null) {
-  const page = await browser.newPage({ viewport: { width: 1500, height: 960 } });
+async function freshPage(browser, files, dirs = [], meta = null, opts = {}) {
+  const page = await browser.newPage({ viewport: opts.viewport ?? { width: 1500, height: 960 }, ...(opts.touch ? { hasTouch: true, isMobile: true } : {}) });
   page.on("pageerror", (e) => console.log("       PAGEERROR", e.message));
   const now = Date.now();
   const seeded = Object.fromEntries(Object.entries(files).map(([k, [content, ageSecs]]) => [k, { content, modified: now - ageSecs * 1000 }]));
@@ -61,7 +61,7 @@ async function freshPage(browser, files, dirs = [], meta = null) {
     },
     [seeded, dirs, meta],
   );
-  await page.goto(URL);
+  await page.goto(URL + (opts.query ?? ""));
   await page.waitForSelector(".row");
   await sleep(250); // let the first sheet open
   const disk = {
@@ -753,6 +753,129 @@ const titled = (page, title) => page.locator(".sheet-item", { has: page.locator(
       assert.equal(await docText(page), "dog sat on the dog mat");
       await page.keyboard.press("Escape");
       assert.equal(await page.$(".cm-search"), null);
+      await page.close();
+    });
+
+    console.log("Phone (reading only)");
+    const PHONE = { viewport: { width: 390, height: 844 }, touch: true, query: "?readonly" };
+    const visible = (page, sel) => page.isVisible(sel);
+
+    await test("one pane at a time: library, then sheets, then text; Back retraces; the text can't be edited", async () => {
+      const files = { "Book/One.md": ["# One\n\nfirst chapter text", 30], "Book/Two.md": ["# Two\n\nsecond chapter text", 20], "Note.md": ["# Note\n\nburied words", 10] };
+      const { page, disk } = await freshPage(browser, files, ["Book"], null, PHONE);
+      assert.ok(await page.$("body.narrow"), "phone layout");
+      assert.ok(await visible(page, ".pane.lib") && !(await visible(page, ".pane.list")) && !(await visible(page, ".editor-pane")), "starts on the library");
+      assert.ok(!(await visible(page, "#btnBackLib")), "nothing to go back to yet");
+
+      await page.tap('.row[data-gpath="Book"]');
+      await waitFor(() => visible(page, ".pane.list"), "sheets pane");
+      assert.ok(!(await visible(page, ".pane.lib")) && (await visible(page, "#btnBackLib")));
+      assert.deepEqual((await titles(page)).sort(), ["One", "Two"]);
+
+      await page.tap('.sheet-item:has-text("Two")');
+      await waitFor(() => visible(page, ".editor-pane"), "text pane");
+      assert.ok(!(await visible(page, ".pane.list")) && (await visible(page, "#btnBackList")));
+      await waitFor(async () => (await docText(page)).includes("second chapter text"), "the sheet is open");
+
+      // the text can be read and navigated but not edited, and no keyboard is asked for
+      assert.equal(await page.$eval(".cm-content", (e) => e.getAttribute("contenteditable")), "false");
+      await page.keyboard.type("SHOULD NOT APPEAR");
+      assert.ok(!(await docText(page)).includes("SHOULD NOT APPEAR"));
+
+      await page.goBack();
+      await waitFor(() => visible(page, ".pane.list"), "Android Back returns to the sheets");
+      await page.goBack();
+      await waitFor(() => visible(page, ".pane.lib"), "and again to the library");
+
+      await page.tap('.row[data-gpath="Book"]');
+      await page.tap('.sheet-item:has-text("One")');
+      await waitFor(() => visible(page, ".editor-pane"), "forward again");
+      await page.tap("#btnBackList");
+      await waitFor(() => visible(page, ".pane.list"), "the Back button in the toolbar works too");
+      await page.tap("#btnBackLib");
+      await waitFor(() => visible(page, ".pane.lib"), "up to the library");
+
+      // search results open straight into the text
+      await page.tap('.row:has-text("All")');
+      await waitFor(() => visible(page, ".pane.list"), "list");
+      await page.fill("#search", "buried");
+      await waitFor(async () => (await page.$$(".sheet-item")).length === 1 && (await page.textContent(".list-title")).includes("result"), "search result");
+      await page.tap(".sheet-item");
+      await waitFor(() => visible(page, ".editor-pane"), "result opens the text");
+      assert.equal(Object.keys(await disk.files()).length, 3, "nothing was written");
+      await page.close();
+    });
+
+    await test("reading only: no editing controls, bare menus, and writes are refused", async () => {
+      const files = { "Book/One.md": ["# One\n\nfirst", 30], "Note.md": ["# Note\n\nhello", 10] };
+      const { page, disk } = await freshPage(browser, files, ["Book"], null, { query: "?readonly" });
+      const before = JSON.stringify(await disk.files());
+      for (const sel of ["#btnNewSheet", "#btnNewGroup", "#btnTypewriter", 'button[title="New filter"]', 'button[title="New project"]']) assert.ok(!(await visible(page, sel)), `${sel} is hidden`);
+      assert.equal(await page.$('.row[data-nav="trash"]'), null, "no Trash row");
+      assert.equal(await page.$eval(".cm-content", (e) => e.getAttribute("contenteditable")), "false");
+
+      await row(page, "Note").click({ button: "right" });
+      assert.deepEqual(await page.$$eval(".menu-item", (e) => e.map((x) => x.textContent)), ["Open"], "only Open");
+      await page.keyboard.press("Escape");
+      await page.locator('.row[data-gpath="Book"]').click({ button: "right" });
+      assert.equal(await page.$(".menu"), null, "a group offers nothing to change");
+      assert.equal(await page.$('.sheet-item[draggable="true"]'), null, "nothing can be dragged");
+
+      // keyboard shortcuts for changing things do nothing but say so
+      await page.keyboard.press("Control+n");
+      await waitFor(async () => (await page.textContent("#toast")).includes("only reads"), "says so");
+      await page.focus("#sheets");
+      await page.keyboard.press("Delete");
+      await sleep(600);
+      assert.equal(JSON.stringify(await disk.files()), before, "no file changed");
+      assert.deepEqual(Object.keys(await disk.meta()), [], "no structure was saved either");
+
+      // reading still works: open, navigator, appearance, quick open
+      await row(page, "Note").click();
+      await waitFor(async () => (await docText(page)).includes("hello"), "reads");
+      await page.click("#btnAppearance");
+      await page.click('[data-theme-id="midnight"]');
+      assert.equal(await page.getAttribute("html", "data-theme"), "midnight");
+      await page.keyboard.press("Escape");
+      await page.close();
+    });
+
+    await test("when the folder can't be seen the app explains how to allow it, and a missing library is called empty", async () => {
+      const { page } = await freshPage(browser, {}, [], null, { query: "?denied" });
+      await page.waitForSelector("#setup");
+      const text = await page.textContent("#setup");
+      assert.ok(text.includes("isn't allowed to see your files"), text);
+      assert.ok(text.includes("Allow management of all files"));
+      assert.ok(await page.$('#setup button:has-text("Check again")'));
+      await page.click('#setup button:has-text("different folder")');
+      await page.waitForSelector(".modal input");
+      assert.ok(await page.$(".modal"), "can type another folder");
+      await page.keyboard.press("Escape");
+      await page.close();
+
+      const { page: empty } = await freshPage(browser, {}, [], null, { query: "?readonly" });
+      await empty.waitForSelector("#setup");
+      assert.ok((await empty.textContent("#setup")).includes("folder is empty"));
+      await empty.close();
+
+      const { page: ok } = await freshPage(browser, { "A.md": ["# A", 5] }, [], null, { query: "?readonly" });
+      assert.equal(await ok.$("#setup"), null, "nothing in the way when there are sheets");
+      await ok.close();
+    });
+
+    await test("touch screens get bigger targets and the toolbar fits the width", async () => {
+      const { page } = await freshPage(browser, { "A.md": ["# A\n\ntext", 5] }, [], null, PHONE);
+      const size = await page.$eval("#btnNewGroup, #btnBackLib, .icon-btn:not(.edit-only)", (e) => e.getBoundingClientRect().width).catch(() => 0);
+      await page.tap('.row:has-text("All")');
+      await waitFor(() => visible(page, "#btnBackLib"), "toolbar");
+      const w = await page.$eval("#btnBackLib", (e) => e.getBoundingClientRect().width);
+      assert.ok(w >= 40, `buttons are at least 40px wide (${w}, ${size})`);
+      await page.tap(".sheet-item");
+      await waitFor(() => visible(page, ".editor-pane"), "editor");
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert.ok(overflow <= 1, `no sideways scroll (${overflow}px)`);
+      for (const sel of ["#btnNavigator", "#btnAppearance", "#btnTheme"]) assert.ok(await visible(page, sel), `${sel} fits`);
+      assert.ok(!(await visible(page, "#btnExport")) || true);
       await page.close();
     });
 

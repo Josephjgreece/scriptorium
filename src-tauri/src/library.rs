@@ -35,6 +35,18 @@ pub struct SheetInfo {
     pub original: Option<String>,
 }
 
+/// What the app can see at the library path. On Android the folder can be invisible to the app
+/// until "All files access" is granted, which looks like a missing or empty folder.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Probe {
+    /// the folder was found (or could not be ruled out: a denied folder may well exist)
+    pub exists: bool,
+    pub readable: bool,
+    pub denied: bool,
+    pub sheets: usize,
+}
+
 /// Something in the trash: a sheet, or a whole group with its sheets.
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -671,6 +683,24 @@ pub fn stamp(root: &Path) -> String {
     format!("{:016x}", h.finish())
 }
 
+// ---------- first look at a library folder ----------
+
+pub fn probe(root: &Path) -> Probe {
+    match fs::read_dir(root) {
+        Ok(_) => {
+            let mut files = Vec::new();
+            collect_md(root, true, &mut files);
+            Probe { exists: true, readable: true, denied: false, sheets: files.len() }
+        }
+        Err(e) => Probe {
+            exists: e.kind() != io::ErrorKind::NotFound,
+            readable: false,
+            denied: e.kind() == io::ErrorKind::PermissionDenied,
+            sheets: 0,
+        },
+    }
+}
+
 // ---------- sync conflicts ----------
 
 /// If a sheet's name looks like a sync service's conflicted copy, the name it was copied from.
@@ -1057,6 +1087,22 @@ mod tests {
         let item = list_trash(&root).remove(0);
         assert_eq!((item.original.as_str(), item.deleted), ("", 1_760_000_000));
         assert_eq!(restore_trash(&root, &item.id).unwrap(), "Old.md");
+    }
+
+    #[test]
+    fn probe_tells_missing_empty_and_full_apart() {
+        let root = tmp("probe");
+        assert_eq!(probe(&root), Probe { exists: true, readable: true, denied: false, sheets: 0 });
+        fs::create_dir_all(root.join("Book")).unwrap();
+        fs::write(root.join("a.md"), "# a").unwrap();
+        fs::write(root.join("Book/b.md"), "# b").unwrap();
+        fs::write(root.join("notes.txt"), "not a sheet").unwrap();
+        assert_eq!(probe(&root).sheets, 2);
+        let missing = probe(&root.join("nope"));
+        assert_eq!((missing.exists, missing.readable, missing.denied), (false, false, false));
+        // a file where a folder should be is "there" but not readable as a library
+        let file = probe(&root.join("a.md"));
+        assert!(!file.readable);
     }
 
     #[test]

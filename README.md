@@ -59,6 +59,22 @@ Checks: `npm test` (unit), `cd src-tauri && cargo test --lib` (Rust), `npm run t
 
 `npm run dev` on its own runs the UI in a browser against a throwaway localStorage library, which is handy for working on the interface.
 
+## Android (reading only)
+
+The Android app is a reader: it shows your sheets, projects, navigator, search and statistics, and lets you change the appearance, but it never writes anything. Your library stays plain Markdown in a folder, so the phone reads the same folder your computer writes.
+
+**Get the app.** In GitHub, Actions, "Android app", run the workflow and download `Scriptorium-android-arm64.apk` from the run. Copy it to the phone and open it (Android will ask to allow installing from that source). Phones from the last several years are arm64. To keep updates installing over each other, give the workflow a signing key once: create a keystore with `keytool`, then add these repository secrets: `ANDROID_KEYSTORE_BASE64` (the file, base64-encoded), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Without them each build uses a throwaway key, and a newer APK must be installed after removing the old one.
+
+**Let it see your library.** Android hides most folders from apps. The first time, Scriptorium shows a screen that says so. Allow it under Settings, Apps, Scriptorium, Permissions, Files and media, "Allow management of all files" (also under Special app access, All files access), then tap Check again. It looks in `Documents/Scriptorium` on the phone's shared storage; "Use a different folder…" lets you type another path.
+
+**Get your sheets there.** Keep your library folder in `Documents/Scriptorium` on the phone with a folder-sync app (Syncthing is one that syncs a plain folder; copying the folder over USB also works). The app notices changes within a few seconds. Cloud drive apps that don't expose a plain folder won't do.
+
+**What is not on the phone:** editing, export (it needs Pandoc), the Trash and conflicts views, and everything else that changes files.
+
+**Build it yourself.** Install Android Studio (SDK and NDK), set `ANDROID_HOME` and `NDK_HOME`, run `rustup target add aarch64-linux-android`, then `npm install` and `npm run tauri android build -- --apk --target aarch64`. To sign it, put `storeFile`, `storePassword`, `keyAlias` and `keyPassword` in `src-tauri/gen/android/app/keystore.properties` (git ignores that file). The Android project is in `src-tauri/gen/android`.
+
+On a computer, `SCRIPTORIUM_READONLY=1` starts the desktop app in the same read-only mode, and adding `?readonly` to the address of `npm run dev` shows it in a browser (add `?denied` to see the "can't see your files" screen). Narrow the window under about 820 px to see the one-pane phone layout.
+
 ## Layout
 
 ```

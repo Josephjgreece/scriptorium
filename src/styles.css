@@ -1469,3 +1469,188 @@ body.typewriter .cm-scroller .cm-content {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ---------- reading only (the phone app) ---------- */
+
+body.read-only .edit-only {
+  display: none !important;
+}
+
+body.no-export #btnExport {
+  display: none;
+}
+
+/* ---------- the library can't be seen yet ---------- */
+
+.setup {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: var(--bg);
+  overflow: auto;
+}
+
+.setup-card {
+  max-width: 460px;
+}
+
+.setup-card h2 {
+  margin: 0 0 14px;
+  font-size: 21px;
+  line-height: 1.25;
+}
+
+.setup-card p {
+  margin: 0 0 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.setup-card .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+/* ---------- notches and gesture bars ---------- */
+
+.app {
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+/* ---------- touch screens: bigger targets ---------- */
+
+@media (pointer: coarse) {
+  .icon-btn {
+    width: 42px;
+    height: 42px;
+  }
+
+  .icon-btn svg {
+    width: 20px;
+    height: 20px;
+  }
+
+  .icon-btn.mini {
+    width: 34px;
+    height: 34px;
+  }
+
+  .row {
+    height: 46px;
+  }
+
+  .sheet-item {
+    padding: 14px 16px 15px;
+  }
+
+  .menu-item {
+    padding: 13px 14px;
+  }
+
+  .seg {
+    padding: 11px 8px;
+  }
+
+  #search {
+    height: 38px;
+  }
+
+  .nav-item {
+    padding: 12px;
+  }
+
+  .tree-label {
+    padding-top: 18px;
+  }
+}
+
+/* ---------- phone-sized windows: one pane at a time ---------- */
+
+.only-narrow {
+  display: none;
+}
+
+.tb-title {
+  font-weight: 600;
+}
+
+body.narrow .app {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "tb"
+    "pn";
+}
+
+body.narrow .tb-lib,
+body.narrow .tb-list,
+body.narrow .tb-ed {
+  grid-area: tb;
+}
+
+body.narrow .pane.lib,
+body.narrow .pane.list,
+body.narrow .editor-pane {
+  grid-area: pn;
+}
+
+body.narrow .split,
+body.narrow .tb-lib,
+body.narrow .tb-list,
+body.narrow .tb-ed,
+body.narrow .pane.lib,
+body.narrow .pane.list,
+body.narrow .editor-pane {
+  display: none;
+}
+
+body.narrow[data-pane="lib"] .tb-lib,
+body.narrow[data-pane="list"] .tb-list,
+body.narrow[data-pane="ed"] .tb-ed,
+body.narrow[data-pane="lib"] .pane.lib,
+body.narrow[data-pane="list"] .pane.list,
+body.narrow[data-pane="ed"] .editor-pane {
+  display: flex;
+}
+
+body.narrow .only-narrow {
+  display: grid;
+}
+
+body.narrow .tb-title {
+  display: block;
+}
+
+body.narrow #btnSidebar,
+body.narrow #btnSidebar2 {
+  display: none;
+}
+
+body.narrow .tb {
+  padding-left: 8px;
+}
+
+body.narrow .ed-crumb {
+  padding-left: 4px;
+}
+
+body.narrow #btnBackLib svg,
+body.narrow #btnBackList svg {
+  transform: rotate(180deg);
+}
+
+body.narrow .cm-editor .cm-content {
+  padding: 1.4rem 1.1rem 40vh !important;
+}
+
+body.narrow #stChars {
+  display: none;
+}
+
+body.narrow .popover {
+  max-width: 94vw;
+}
