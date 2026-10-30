@@ -29,6 +29,39 @@ pub struct SheetInfo {
     pub preview: String,
     pub modified: u64,
     pub words: usize,
+    /// Looks like a copy a sync service made when two devices edited the same sheet.
+    pub conflict: bool,
+    /// For a conflicted copy: the sheet it was copied from, when that still exists.
+    pub original: Option<String>,
+}
+
+/// What the app can see at the library path. On Android the folder can be invisible to the app
+/// until "All files access" is granted, which looks like a missing or empty folder.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Probe {
+    /// the folder was found (or could not be ruled out: a denied folder may well exist)
+    pub exists: bool,
+    pub readable: bool,
+    pub denied: bool,
+    pub sheets: usize,
+}
+
+/// Something in the trash: a sheet, or a whole group with its sheets.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashItem {
+    /// the entry's name inside `.trash`; what the other trash functions take
+    pub id: String,
+    pub name: String,
+    pub title: String,
+    pub preview: String,
+    pub is_group: bool,
+    /// where it was before it was deleted ("" when unknown)
+    pub original: String,
+    pub deleted: u64,
+    pub sheets: usize,
+    pub words: usize,
 }
 
 #[derive(Serialize, Debug)]
@@ -122,6 +155,34 @@ fn unique_path(dir: &Path, stem: &str, ext: Option<&str>) -> PathBuf {
 
 // ---------- text helpers ----------
 
+/// `<!-- ... -->` comments are annotations: they stay out of counts and exports. An unterminated
+/// one is left alone, so a half-typed comment never swallows the rest of the sheet.
+pub fn strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        match rest[start + 4..].find("-->") {
+            Some(end) => {
+                out.push_str(&rest[..start]);
+                out.push(' ');
+                rest = &rest[start + 4 + end + 3..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A word is a run of non-space characters with at least one letter or digit, so Markdown
+/// marks on their own ("#", "-", ">", "---") are not words. Comments don't count.
+pub fn count_words(text: &str) -> usize {
+    strip_comments(text)
+        .split_whitespace()
+        .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
+        .count()
+}
+
 fn clean_title_line(line: &str) -> String {
     line.trim()
         .trim_start_matches('#')
@@ -133,7 +194,8 @@ fn clean_title_line(line: &str) -> String {
 }
 
 fn first_line_title(text: &str) -> String {
-    text.lines()
+    strip_comments(text)
+        .lines()
         .map(|l| l.trim())
         .find(|l| !l.is_empty())
         .map(clean_title_line)
@@ -141,7 +203,9 @@ fn first_line_title(text: &str) -> String {
 }
 
 fn title_and_preview(text: &str, fallback: &str) -> (String, String) {
-    let mut lines = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty());
+    // comments are for you: they never show up as a title or a preview
+    let clean = strip_comments(text);
+    let mut lines = clean.lines().map(|l| l.trim()).filter(|l| !l.is_empty());
     let title = lines
         .next()
         .map(clean_title_line)
@@ -240,7 +304,9 @@ pub fn sheets(root: &Path, group: &str, recursive: bool) -> Res<Vec<SheetInfo>> 
                 title,
                 preview,
                 modified: modified_secs(p),
-                words: text.split_whitespace().count(),
+                words: count_words(&text),
+                conflict: conflict_original_stem(&stem_of(p)).is_some(),
+                original: original_path(p).map(|o| rel_of(root, &o)),
             }
         })
         .collect();
@@ -262,7 +328,7 @@ pub fn write_sheet(root: &Path, rel: &str, content: &str) -> Res<String> {
     if !is_md(&p) {
         return Err("Not a sheet".into());
     }
-    fs::write(&p, content).map_err(err)?;
+    write_atomic(&p, content)?;
     if is_untitled(&stem_of(&p)) {
         let slug = slugify(&first_line_title(content));
         if !slug.is_empty() {
@@ -275,6 +341,18 @@ pub fn write_sheet(root: &Path, rel: &str, content: &str) -> Res<String> {
         }
     }
     Ok(rel_of(root, &p))
+}
+
+/// Write to a hidden temp file in the same folder, then rename over the target, so a crash or a
+/// sync client reading mid-write never sees half a sheet.
+pub fn write_atomic(target: &Path, content: &str) -> Res<()> {
+    let dir = target.parent().ok_or("Sheet has no folder")?;
+    let tmp = dir.join(format!(".{}.tmp", name_of(target)));
+    fs::write(&tmp, content).map_err(err)?;
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        err(e)
+    })
 }
 
 pub fn create_sheet(root: &Path, group: &str) -> Res<String> {
@@ -336,7 +414,140 @@ pub fn delete_item(root: &Path, rel: &str) -> Res<()> {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let dest = trash.join(format!("{stamp}-{}", name_of(&src)));
-    fs::rename(&src, &dest).map_err(err)
+    fs::rename(&src, &dest).map_err(err)?;
+    // remember where it came from so it can be put back
+    let _ = fs::write(trash.join(format!("{}.origin", name_of(&dest))), rel_of(root, &src));
+    Ok(())
+}
+
+// ---------- trash ----------
+
+const TRASH: &str = ".trash";
+const ORIGIN_EXT: &str = ".origin";
+
+/// A trash entry by id, refusing anything that isn't a plain entry name inside `.trash`.
+fn trash_entry(root: &Path, id: &str) -> Res<PathBuf> {
+    if id.is_empty() || id.contains(['/', '\\']) || id.starts_with('.') || id.ends_with(ORIGIN_EXT) {
+        return Err("Not in the trash".into());
+    }
+    let p = root.join(TRASH).join(id);
+    if p.exists() {
+        Ok(p)
+    } else {
+        Err("Not in the trash".into())
+    }
+}
+
+fn origin_file(root: &Path, id: &str) -> PathBuf {
+    root.join(TRASH).join(format!("{id}{ORIGIN_EXT}"))
+}
+
+/// "1760000000000-Chapter.md" -> (1760000000, "Chapter.md")
+fn split_trash_id(id: &str) -> (u64, String) {
+    match id.split_once('-') {
+        Some((ms, name)) if !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()) => (ms.parse::<u64>().unwrap_or(0) / 1000, name.to_string()),
+        _ => (0, id.to_string()),
+    }
+}
+
+pub fn list_trash(root: &Path) -> Vec<TrashItem> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(root.join(TRASH)) else {
+        return out;
+    };
+    for e in rd.flatten() {
+        let id = e.file_name().to_string_lossy().into_owned();
+        if id.starts_with('.') || id.ends_with(ORIGIN_EXT) {
+            continue;
+        }
+        let p = e.path();
+        let (deleted, name) = split_trash_id(&id);
+        let original = fs::read_to_string(origin_file(root, &id)).unwrap_or_default().trim().to_string();
+        if p.is_dir() {
+            let mut files = Vec::new();
+            collect_md(&p, true, &mut files);
+            let words = files.iter().map(|f| count_words(&fs::read_to_string(f).unwrap_or_default())).sum();
+            out.push(TrashItem {
+                id,
+                title: name.clone(),
+                name,
+                preview: format!("{} {}", files.len(), if files.len() == 1 { "sheet" } else { "sheets" }),
+                is_group: true,
+                original,
+                deleted,
+                sheets: files.len(),
+                words,
+            });
+        } else if is_md(&p) {
+            let text = fs::read_to_string(&p).unwrap_or_default();
+            let (title, preview) = title_and_preview(&text, &stem_of(&p));
+            out.push(TrashItem {
+                id,
+                name,
+                title,
+                preview,
+                is_group: false,
+                original,
+                deleted,
+                sheets: 1,
+                words: count_words(&text),
+            });
+        }
+    }
+    out.sort_by(|a, b| b.deleted.cmp(&a.deleted).then_with(|| a.title.cmp(&b.title)));
+    out
+}
+
+pub fn read_trash_sheet(root: &Path, id: &str) -> Res<String> {
+    let p = trash_entry(root, id)?;
+    if !p.is_file() {
+        return Err("That is a group, not a sheet".into());
+    }
+    fs::read_to_string(p).map_err(err)
+}
+
+/// Put an item back where it was deleted from (recreating the group if that's gone). A name
+/// clash gets a number rather than replacing anything. Returns the new library path.
+pub fn restore_trash(root: &Path, id: &str) -> Res<String> {
+    let item = trash_entry(root, id)?;
+    let original = fs::read_to_string(origin_file(root, id)).unwrap_or_default();
+    let original = original.trim();
+    let (parent, name) = match original.rsplit_once('/') {
+        Some((parent, name)) => (parent.to_string(), name.to_string()),
+        None if !original.is_empty() => (String::new(), original.to_string()),
+        None => (String::new(), split_trash_id(id).1),
+    };
+    let dir = resolve(root, &parent)?;
+    fs::create_dir_all(&dir).map_err(err)?;
+    let target = if item.is_dir() {
+        unique_path(&dir, &name, None)
+    } else {
+        unique_path(&dir, name.strip_suffix(".md").unwrap_or(&name), Some("md"))
+    };
+    fs::rename(&item, &target).map_err(err)?;
+    let _ = fs::remove_file(origin_file(root, id));
+    Ok(rel_of(root, &target))
+}
+
+/// Delete one trash entry for good.
+pub fn purge_trash(root: &Path, id: &str) -> Res<()> {
+    let p = trash_entry(root, id)?;
+    if p.is_dir() {
+        fs::remove_dir_all(&p).map_err(err)?;
+    } else {
+        fs::remove_file(&p).map_err(err)?;
+    }
+    let _ = fs::remove_file(origin_file(root, id));
+    Ok(())
+}
+
+pub fn empty_trash(root: &Path) -> Res<usize> {
+    let mut n = 0;
+    for item in list_trash(root) {
+        purge_trash(root, &item.id)?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 pub fn move_item(root: &Path, rel: &str, dest_group: &str) -> Res<String> {
@@ -394,8 +605,21 @@ pub fn search(root: &Path, query: &str) -> Vec<SearchHit> {
 
 pub fn export(root: &Path, rel: &str, dest: &str) -> Res<()> {
     let src = resolve(root, rel)?;
+    run_pandoc(&src, dest)
+}
+
+/// Export text that isn't a single file on disk (glued sheets joined together).
+pub fn export_text(content: &str, dest: &str) -> Res<()> {
+    let tmp = std::env::temp_dir().join(format!("scriptorium-export-{}.md", std::process::id()));
+    fs::write(&tmp, content).map_err(err)?;
+    let r = run_pandoc(&tmp, dest);
+    let _ = fs::remove_file(&tmp);
+    r
+}
+
+fn run_pandoc(src: &Path, dest: &str) -> Res<()> {
     let out = Command::new("pandoc")
-        .arg(&src)
+        .arg(src)
         .arg("-f")
         .arg("markdown")
         .arg("-o")
@@ -409,6 +633,142 @@ pub fn export(root: &Path, rel: &str, dest: &str) -> Res<()> {
         Ok(o) if o.status.success() => Ok(()),
         Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
     }
+}
+
+// ---------- structure metadata ----------
+
+const META_FILE: &str = ".scriptorium.json";
+
+/// Sheet order, material flags, glued sheets and saved filters live in one hidden JSON file in
+/// the library root, so the Markdown files themselves stay clean. The UI owns the schema.
+pub fn read_meta(root: &Path) -> String {
+    fs::read_to_string(root.join(META_FILE)).unwrap_or_default()
+}
+
+pub fn write_meta(root: &Path, json: &str) -> Res<()> {
+    write_atomic(&root.join(META_FILE), json)
+}
+
+// ---------- change detection (for sync folders and outside edits) ----------
+
+/// A cheap fingerprint of everything visible in the library: folders, sheets and the structure
+/// file, by name, size and modification time. It changes whenever something changes on disk.
+pub fn stamp(root: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    fn walk(dir: &Path, h: &mut DefaultHasher) {
+        let mut entries: Vec<_> = fs::read_dir(dir).map(|rd| rd.flatten().collect()).unwrap_or_default();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let path = e.path();
+            if path.is_dir() {
+                if !is_hidden(&name) {
+                    name.hash(h);
+                    walk(&path, h);
+                }
+            } else if is_md(&path) && !is_hidden(&name) || name == META_FILE {
+                let m = fs::metadata(&path).ok();
+                name.hash(h);
+                m.as_ref().map(|m| m.len()).hash(h);
+                m.and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .hash(h);
+            }
+        }
+    }
+    let mut h = DefaultHasher::new();
+    walk(root, &mut h);
+    format!("{:016x}", h.finish())
+}
+
+// ---------- first look at a library folder ----------
+
+pub fn probe(root: &Path) -> Probe {
+    match fs::read_dir(root) {
+        Ok(_) => {
+            let mut files = Vec::new();
+            collect_md(root, true, &mut files);
+            Probe { exists: true, readable: true, denied: false, sheets: files.len() }
+        }
+        Err(e) => Probe {
+            exists: e.kind() != io::ErrorKind::NotFound,
+            readable: false,
+            denied: e.kind() == io::ErrorKind::PermissionDenied,
+            sheets: 0,
+        },
+    }
+}
+
+// ---------- sync conflicts ----------
+
+/// If a sheet's name looks like a sync service's conflicted copy, the name it was copied from.
+/// Recognised: Dropbox ("Name (Joe's conflicted copy 2026-01-01)") and Syncthing
+/// ("Name.sync-conflict-20260101-120000-ABCDEFG").
+fn conflict_original_stem(stem: &str) -> Option<String> {
+    let lower = stem.to_ascii_lowercase();
+    let original = if let Some(i) = lower.find("conflicted copy") {
+        // must be the parenthesised form, so a title that merely says it isn't flagged
+        let open = stem[..i].rfind('(')?;
+        let close = stem[i..].find(')').map(|c| i + c + 1).unwrap_or(stem.len());
+        format!("{}{}", stem[..open].trim_end(), &stem[close..])
+    } else if let Some(i) = lower.find(".sync-conflict-") {
+        stem[..i].to_string()
+    } else {
+        return None;
+    };
+    let original = original.trim().to_string();
+    if original.is_empty() {
+        None
+    } else {
+        Some(original)
+    }
+}
+
+fn original_path(copy: &Path) -> Option<PathBuf> {
+    let stem = conflict_original_stem(&stem_of(copy))?;
+    let candidate = copy.parent()?.join(format!("{stem}.md"));
+    candidate.is_file().then_some(candidate)
+}
+
+/// Settle a conflicted copy. `keep_copy` makes the copy the sheet (the old one goes to the
+/// trash); otherwise the copy goes to the trash. Returns the path of the surviving sheet.
+pub fn resolve_conflict(root: &Path, rel: &str, keep_copy: bool) -> Res<String> {
+    let copy = resolve(root, rel)?;
+    let original = original_path(&copy).ok_or("The original sheet isn't there any more")?;
+    if keep_copy {
+        delete_item(root, &rel_of(root, &original))?;
+        fs::rename(&copy, &original).map_err(err)?;
+    } else {
+        delete_item(root, rel)?;
+    }
+    Ok(rel_of(root, &original))
+}
+
+/// Keep text that must not be lost beside the sheet it came from, named like a conflicted copy.
+pub fn save_conflict_copy(root: &Path, rel: &str, content: &str) -> Res<String> {
+    let p = resolve(root, rel)?;
+    let dir = p.parent().ok_or("Sheet has no folder")?;
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let target = unique_path(dir, &format!("{} (conflicted copy {})", stem_of(&p), utc_stamp(secs)), Some("md"));
+    write_atomic(&target, content)?;
+    Ok(rel_of(root, &target))
+}
+
+fn utc_stamp(secs: u64) -> String {
+    // days since 1970-01-01 to a civil date (Howard Hinnant's algorithm)
+    let z = (secs / 86400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    let minutes = (secs % 86400) / 60;
+    format!("{year:04}-{month:02}-{day:02} {:02}{:02}", minutes / 60, minutes % 60)
 }
 
 // ---------- first run ----------
@@ -504,7 +864,7 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].title, "Intro");
         assert_eq!(all[0].preview, "Some words here");
-        assert_eq!(all[0].words, 5);
+        assert_eq!(all[0].words, 4);
         assert!(sheets(&r, "", false).unwrap().is_empty());
     }
 
@@ -541,6 +901,239 @@ mod tests {
         assert!(h[0].snippet.contains("Quick"));
         assert_eq!(search(&r, "beta").len(), 1);
         assert!(search(&r, "  ").is_empty());
+    }
+
+    #[test]
+    fn meta_round_trips_and_stays_hidden() {
+        let root = tmp("meta");
+        assert_eq!(read_meta(&root), "");
+        write_meta(&root, "{\"material\":[]}").unwrap();
+        assert_eq!(read_meta(&root), "{\"material\":[]}");
+        assert!(sheets(&root, "", true).unwrap().is_empty());
+        assert!(!tree(&root).children.iter().any(|g| g.name.starts_with('.')));
+    }
+
+    #[test]
+    fn atomic_write_leaves_no_temp_file() {
+        let root = tmp("atomic");
+        let p = create_sheet(&root, "").unwrap();
+        let p = write_sheet(&root, &p, "hello").unwrap();
+        assert_eq!(read_sheet(&root, &p).unwrap(), "hello");
+        let names: Vec<_> = fs::read_dir(&root).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+    }
+
+    #[test]
+    fn conflict_names_are_recognised() {
+        assert_eq!(conflict_original_stem("Chapter (Joe's conflicted copy 2026-01-01)").as_deref(), Some("Chapter"));
+        assert_eq!(conflict_original_stem("Chapter (Conflicted Copy)").as_deref(), Some("Chapter"));
+        assert_eq!(conflict_original_stem("Chapter.sync-conflict-20260101-120000-ABCDEFG").as_deref(), Some("Chapter"));
+        assert_eq!(conflict_original_stem("Chapter 2"), None);
+        assert_eq!(conflict_original_stem("A story about a conflicted copy editor"), None);
+        assert_eq!(conflict_original_stem("(conflicted copy)"), None);
+    }
+
+    #[test]
+    fn conflicts_are_flagged_and_resolvable() {
+        let root = tmp("conflict");
+        fs::write(root.join("Chapter.md"), "mine").unwrap();
+        fs::write(root.join("Chapter (Joe's conflicted copy 2026-01-01).md"), "theirs").unwrap();
+        let list = sheets(&root, "", false).unwrap();
+        let copy = list.iter().find(|s| s.conflict).expect("copy flagged");
+        assert_eq!(copy.original.as_deref(), Some("Chapter.md"));
+        assert!(list.iter().filter(|s| !s.conflict).all(|s| s.original.is_none()));
+
+        // keep the copy: it replaces the original, the old text survives in the trash
+        let kept = resolve_conflict(&root, &copy.path, true).unwrap();
+        assert_eq!(kept, "Chapter.md");
+        assert_eq!(read_sheet(&root, "Chapter.md").unwrap(), "theirs");
+        assert_eq!(sheets(&root, "", false).unwrap().len(), 1);
+        assert!(root.join(".trash").read_dir().unwrap().count() >= 1);
+
+        // discard a copy
+        fs::write(root.join("Chapter.sync-conflict-20260101-120000-ABC.md"), "other").unwrap();
+        resolve_conflict(&root, "Chapter.sync-conflict-20260101-120000-ABC.md", false).unwrap();
+        assert_eq!(read_sheet(&root, "Chapter.md").unwrap(), "theirs");
+        assert_eq!(sheets(&root, "", false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn conflict_copy_keeps_text_beside_the_sheet() {
+        let root = tmp("copy");
+        fs::write(root.join("Chapter.md"), "disk").unwrap();
+        let rel = save_conflict_copy(&root, "Chapter.md", "my unsaved words").unwrap();
+        assert!(rel.starts_with("Chapter (conflicted copy "), "{rel}");
+        assert_eq!(read_sheet(&root, &rel).unwrap(), "my unsaved words");
+        let list = sheets(&root, "", false).unwrap();
+        assert_eq!(list.iter().find(|s| s.path == rel).unwrap().original.as_deref(), Some("Chapter.md"));
+    }
+
+    #[test]
+    fn utc_stamp_is_correct() {
+        assert_eq!(utc_stamp(0), "1970-01-01 0000");
+        assert_eq!(utc_stamp(1_767_225_600 + 3600 * 13 + 60 * 7), "2026-01-01 1307");
+        assert_eq!(utc_stamp(951_782_400), "2000-02-29 0000");
+    }
+
+    #[test]
+    fn stamp_changes_when_anything_visible_changes() {
+        let root = tmp("stamp");
+        let a = stamp(&root);
+        assert_eq!(a, stamp(&root));
+        let p = create_sheet(&root, "").unwrap();
+        let b = stamp(&root);
+        assert_ne!(a, b);
+        write_sheet(&root, &p, "some words").unwrap();
+        let c = stamp(&root);
+        assert_ne!(b, c);
+        write_meta(&root, "{}").unwrap();
+        let d = stamp(&root);
+        assert_ne!(c, d);
+        create_group(&root, "", "Book").unwrap();
+        assert_ne!(d, stamp(&root));
+        // hidden files and the trash are ignored
+        let e = stamp(&root);
+        fs::write(root.join(".scratch"), "x").unwrap();
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        fs::write(root.join(".trash/x.md"), "x").unwrap();
+        assert_eq!(e, stamp(&root));
+    }
+
+    #[test]
+    fn trash_lists_restores_and_purges() {
+        let root = tmp("trash");
+        fs::create_dir_all(root.join("Book")).unwrap();
+        fs::write(root.join("Book/Chapter.md"), "# Chapter\n\nSome words here").unwrap();
+        fs::write(root.join("Note.md"), "# Note\n\nhi").unwrap();
+        delete_item(&root, "Book/Chapter.md").unwrap();
+        delete_item(&root, "Note.md").unwrap();
+
+        let items = list_trash(&root);
+        assert_eq!(items.len(), 2);
+        let ch = items.iter().find(|i| i.title == "Chapter").unwrap();
+        assert_eq!((ch.original.as_str(), ch.is_group, ch.words), ("Book/Chapter.md", false, 4));
+        assert_eq!(read_trash_sheet(&root, &ch.id).unwrap(), "# Chapter\n\nSome words here");
+        assert!(sheets(&root, "", true).unwrap().is_empty(), "trashed sheets are out of the library");
+
+        // back where it came from
+        assert_eq!(restore_trash(&root, &ch.id).unwrap(), "Book/Chapter.md");
+        assert_eq!(read_sheet(&root, "Book/Chapter.md").unwrap(), "# Chapter\n\nSome words here");
+        assert_eq!(list_trash(&root).len(), 1);
+        assert!(!root.join(".trash").read_dir().unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("Chapter")), "origin note is cleaned up");
+
+        // a name clash is numbered, never overwritten
+        let note = list_trash(&root).remove(0);
+        fs::write(root.join("Note.md"), "# Note\n\nnew one").unwrap();
+        assert_eq!(restore_trash(&root, &note.id).unwrap(), "Note 2.md");
+        assert_eq!(read_sheet(&root, "Note.md").unwrap(), "# Note\n\nnew one");
+
+        // forever
+        delete_item(&root, "Note 2.md").unwrap();
+        let id = list_trash(&root).remove(0).id;
+        purge_trash(&root, &id).unwrap();
+        assert!(list_trash(&root).is_empty());
+        assert_eq!(root.join(".trash").read_dir().unwrap().count(), 0);
+    }
+
+    #[test]
+    fn trashed_groups_come_back_whole_and_missing_parents_are_recreated() {
+        let root = tmp("trashgroup");
+        fs::create_dir_all(root.join("A/B")).unwrap();
+        fs::write(root.join("A/B/one.md"), "# one").unwrap();
+        fs::write(root.join("A/B/two.md"), "# two\n\nwords words").unwrap();
+        delete_item(&root, "A/B").unwrap();
+        delete_item(&root, "A").unwrap();
+        let items = list_trash(&root);
+        let b = items.iter().find(|i| i.name == "B").unwrap();
+        assert_eq!((b.is_group, b.sheets, b.words), (true, 2, 4));
+        assert_eq!(b.preview, "2 sheets");
+        // "A" is in the trash too, so restoring B has to recreate A
+        assert_eq!(restore_trash(&root, &b.id).unwrap(), "A/B");
+        assert_eq!(read_sheet(&root, "A/B/two.md").unwrap(), "# two\n\nwords words");
+        assert!(read_trash_sheet(&root, &items.iter().find(|i| i.name == "A").unwrap().id).is_err(), "a group has no text");
+    }
+
+    #[test]
+    fn trash_ids_cannot_escape() {
+        let root = tmp("trashescape");
+        fs::write(root.join("secret.md"), "keep").unwrap();
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        for id in ["../secret.md", "..", ".", "", "a/b", ".hidden", "x.origin"] {
+            assert!(purge_trash(&root, id).is_err(), "{id}");
+            assert!(restore_trash(&root, id).is_err(), "{id}");
+            assert!(read_trash_sheet(&root, id).is_err(), "{id}");
+        }
+        assert_eq!(read_sheet(&root, "secret.md").unwrap(), "keep");
+    }
+
+    #[test]
+    fn empty_trash_only_touches_the_trash() {
+        let root = tmp("emptytrash");
+        fs::write(root.join("keep.md"), "# keep").unwrap();
+        fs::write(root.join("a.md"), "# a").unwrap();
+        fs::write(root.join("b.md"), "# b").unwrap();
+        delete_item(&root, "a.md").unwrap();
+        delete_item(&root, "b.md").unwrap();
+        assert_eq!(empty_trash(&root).unwrap(), 2);
+        assert_eq!(sheets(&root, "", true).unwrap().len(), 1);
+        assert_eq!(empty_trash(&root).unwrap(), 0);
+    }
+
+    #[test]
+    fn items_trashed_before_origins_were_recorded_go_to_the_root() {
+        let root = tmp("legacytrash");
+        fs::create_dir_all(root.join(".trash")).unwrap();
+        fs::write(root.join(".trash/1760000000000-Old.md"), "# Old").unwrap();
+        let item = list_trash(&root).remove(0);
+        assert_eq!((item.original.as_str(), item.deleted), ("", 1_760_000_000));
+        assert_eq!(restore_trash(&root, &item.id).unwrap(), "Old.md");
+    }
+
+    #[test]
+    fn probe_tells_missing_empty_and_full_apart() {
+        let root = tmp("probe");
+        assert_eq!(probe(&root), Probe { exists: true, readable: true, denied: false, sheets: 0 });
+        fs::create_dir_all(root.join("Book")).unwrap();
+        fs::write(root.join("a.md"), "# a").unwrap();
+        fs::write(root.join("Book/b.md"), "# b").unwrap();
+        fs::write(root.join("notes.txt"), "not a sheet").unwrap();
+        assert_eq!(probe(&root).sheets, 2);
+        let missing = probe(&root.join("nope"));
+        assert_eq!((missing.exists, missing.readable, missing.denied), (false, false, false));
+        // a file where a folder should be is "there" but not readable as a library
+        let file = probe(&root.join("a.md"));
+        assert!(!file.readable);
+    }
+
+    #[test]
+    fn a_comment_on_the_first_line_does_not_name_the_file() {
+        let root = tmp("commentname");
+        let p = create_sheet(&root, "").unwrap();
+        let p = write_sheet(&root, &p, "<!-- todo: fix opening -->\n# The Real Name\n\ntext").unwrap();
+        assert_eq!(p, "The Real Name.md");
+        let q = create_sheet(&root, "").unwrap();
+        assert_eq!(write_sheet(&root, &q, "<!-- only a note -->").unwrap(), q, "stays Untitled until there is real text");
+    }
+
+    #[test]
+    fn titles_and_previews_skip_comments() {
+        let (t, p) = title_and_preview("<!-- draft note -->\n# Real title\n\nFirst <!-- aside --> line", "x");
+        assert_eq!((t.as_str(), p.as_str()), ("Real title", "First   line"));
+        let (t2, _) = title_and_preview("<!-- only a comment -->", "fallback");
+        assert_eq!(t2, "fallback");
+    }
+
+    #[test]
+    fn words_ignore_markdown_marks_and_comments() {
+        assert_eq!(count_words("# Title\n\n- item one\n---\n> quoted words\n\n* * *"), 5);
+        assert_eq!(count_words("a <!-- hidden words here --> b"), 2);
+        assert_eq!(count_words("a <!-- multi\nline\ncomment --> b <!-- another --> c"), 3);
+        assert_eq!(count_words("half <!-- typed comment with no end and more words"), 9, "an unterminated comment is just text, so it never swallows the sheet");
+        assert_eq!(count_words("It's 2026 — “quoted”, fine."), 4);
+        assert_eq!(count_words(""), 0);
+        let root = tmp("wordcount");
+        fs::write(root.join("a.md"), "# One\n\n- two <!-- three -->").unwrap();
+        assert_eq!(sheets(&root, "", false).unwrap()[0].words, 2);
     }
 
     #[test]

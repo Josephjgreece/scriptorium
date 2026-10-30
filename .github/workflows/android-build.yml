@@ -1,0 +1,99 @@
+name: Android app
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["src/**", "src-tauri/**", "package*.json", "index.html", "vite.config.ts", ".github/workflows/android-build.yml"]
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: Signed APK (arm64)
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: 27.1.12297006
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # GitHub's Ubuntu machines already carry the Android SDK (ANDROID_HOME). Accept its licences
+      # and add the NDK; Gradle fetches the matching platform on its own.
+      - name: Android SDK licences and NDK
+        run: |
+          SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -n 1)"
+          echo "Using $SDKM"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "ndk;${NDK_VERSION}"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Typecheck and unit tests
+        run: |
+          npx tsc --noEmit
+          npm test
+
+      # The release is signed with the key in the repository secrets (see README, "Android"). Without
+      # them a throwaway key is made for this run: the APK installs fine, but a later build won't
+      # install over it, because Android requires the same key for an update.
+      - name: Signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          else
+            echo "::warning::No signing secrets set: using a throwaway key. Updates won't install over this APK."
+            KEYSTORE_PASSWORD="$(openssl rand -hex 16)"; KEY_ALIAS=scriptorium; KEY_PASSWORD="$KEYSTORE_PASSWORD"
+            keytool -genkeypair -keystore "$KS" -storepass "$KEYSTORE_PASSWORD" -keypass "$KEY_PASSWORD" \
+              -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Scriptorium"
+          fi
+          {
+            echo "storeFile=$KS"
+            echo "storePassword=$KEYSTORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > src-tauri/gen/android/app/keystore.properties
+
+      - name: Build the APK
+        run: npx tauri android build --apk --target aarch64
+
+      - name: Collect the APK
+        run: |
+          mkdir -p out
+          cp "$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' | head -n 1)" out/Scriptorium-android-arm64.apk
+          # several build-tools versions are installed on the runner: use the newest one
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          "$APKSIGNER" verify --print-certs out/Scriptorium-android-arm64.apk
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scriptorium-android-arm64
+          path: out/Scriptorium-android-arm64.apk
+          if-no-files-found: error
