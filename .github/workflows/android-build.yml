@@ -87,7 +87,9 @@ jobs:
         run: |
           mkdir -p out
           cp "$(find src-tauri/gen/android/app/build/outputs/apk -name '*release*.apk' | head -n 1)" out/Scriptorium-android-arm64.apk
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs out/Scriptorium-android-arm64.apk
+          # several build-tools versions are installed on the runner: use the newest one
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          "$APKSIGNER" verify --print-certs out/Scriptorium-android-arm64.apk
           ls -l out
 
       - uses: actions/upload-artifact@v4
