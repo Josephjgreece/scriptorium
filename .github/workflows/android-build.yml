@@ -29,11 +29,14 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Android NDK
+      # GitHub's Ubuntu machines already carry the Android SDK (ANDROID_HOME). Accept its licences
+      # and add the NDK; Gradle fetches the matching platform on its own.
+      - name: Android SDK licences and NDK
         run: |
-          sdkmanager --install "ndk;${NDK_VERSION}"
+          SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -n 1)"
+          echo "Using $SDKM"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "ndk;${NDK_VERSION}"
           echo "NDK_HOME=${ANDROID_HOME}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
